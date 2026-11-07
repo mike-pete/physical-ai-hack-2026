@@ -12,11 +12,14 @@ The page shows the three cameras as they are recorded, every device's state with
 arm's clutch and tool position, warnings, the session's events, and the dataset's episodes with their videos to play
 back. Its actions, which only `dhk-collect` offers: devices' fixes (devices.DeviceSet.apply_fix(): bring a CAN link up
 when it is down, restart the Quest's app when its data stops, restart adb before the Quest is open), setting the task
-text the next episodes record, and deleting chosen episodes (refused while one records; the later ones are
-renumbered). Nothing on it drives the arms. An action is taken only from the page itself (a custom header, and an
-`Origin` that matches the page's address), so no other website open in the same browser can send one through the SSH
-tunnel. `scripts/check_cameras.py` serves the same page with the
-cameras alone.
+text the next episodes record, deleting chosen episodes (refused while one records; the later ones are renumbered),
+and the episode buttons: "Start episode", "Save episode" and "Discard episode" do what the Quest's A and B do, and
+"Reset arms to home" MOVES both arms to Dream-1's home pose and opens their grippers (the emergency stop halts it),
+as does the reset after each episode when "Reset to home after each episode" is ticked. The page never moves an arm
+any other way: it asks the session (collect.SessionControls), whose loop does it, refusing a reset while an episode
+records or in a dry run. An action is taken only from the page itself (a custom header, and an `Origin` that matches
+the page's address), so no other website open in the same browser can send one through the SSH tunnel.
+`scripts/check_cameras.py` serves the same page with the cameras alone.
 
 @see Dashboard
 """
@@ -63,6 +66,7 @@ class Dashboard:
         on_fix: Callable[[str], tuple[bool, str]] | None = None,
         on_task: Callable[[str], tuple[bool, str]] | None = None,
         on_delete: Callable[[list[int]], tuple[bool, str]] | None = None,
+        on_session: Callable[[str], tuple[bool, str]] | None = None,
         task_of: Callable[[], str] | None = None,
     ) -> None:
         """Starts serving.
@@ -76,6 +80,8 @@ class Dashboard:
             None offers no fixes.
         @param on_task Sets the task text the next episodes record; None offers no task box.
         @param on_delete Deletes episodes by number; None offers no delete.
+        @param on_session Takes an episode button's action (collect.SESSION_ACTIONS, or the auto-reset checkbox's
+            collect.AUTO_RESET_ACTIONS), returning whether it was taken and what happened; None offers no buttons.
         @param task_of The task text the next episode records, for the page.
         @throws OSError The port is taken.
         """
@@ -86,6 +92,7 @@ class Dashboard:
         self._on_fix = on_fix
         self._on_task = on_task
         self._on_delete = on_delete
+        self._on_session = on_session
         self._task_of = task_of
         self._lock = threading.Lock()
         self._snapshot: dict[str, Any] = {}
@@ -140,6 +147,7 @@ class Dashboard:
                 "task": self._task_of() if self._task_of else None,
                 "can_set_task": self._on_task is not None,
                 "can_delete": self._on_delete is not None and self._dataset_root is not None,
+                "can_session": self._on_session is not None,
                 "events": list(self._events),
             }
 
@@ -197,6 +205,7 @@ def _handler_for(board: Dashboard) -> type[http.server.BaseHTTPRequestHandler]:
                 "/api/fix": board._on_fix,
                 "/api/task": board._on_task,
                 "/api/episodes/delete": board._on_delete,
+                "/api/session": board._on_session,
             }
             action = actions.get(path)
             if action is None:
@@ -215,6 +224,8 @@ def _handler_for(board: Dashboard) -> type[http.server.BaseHTTPRequestHandler]:
                     ok, message = action(str(body.get("fix", "")))
                 elif path == "/api/task":
                     ok, message = action(str(body.get("task", "")))
+                elif path == "/api/session":
+                    ok, message = action(str(body.get("action", "")))
                 else:
                     episodes = body.get("episodes")
                     if not isinstance(episodes, list) or not all(
@@ -347,6 +358,8 @@ PAGE = """<!doctype html>
   button.action:disabled { opacity: .5; cursor: default; }
   button.danger { border-color: var(--rec); color: var(--rec); }
   .actionresult { color: var(--muted); margin-top: 4px; min-height: 1.2em; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 8px; }
+  #sessionbox { margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
 </style>
 </head>
 <body>
@@ -362,6 +375,16 @@ PAGE = """<!doctype html>
 <section class="grid">
   <div class="panel">
     <h2>Session</h2>
+    <div id="sessionbox" hidden>
+      <div class="controls">
+        <button id="btn-start" class="action" type="button" disabled>Start episode</button>
+        <button id="btn-save" class="action" type="button" disabled>Save episode</button>
+        <button id="btn-discard" class="action danger" type="button" disabled>Discard episode</button>
+        <button id="btn-reset" class="action" type="button" disabled>Reset arms to home</button>
+      </div>
+      <label class="muted" id="autoresetlabel"><input type="checkbox" id="autoreset" checked> Reset to home after each episode</label>
+      <div id="sessionresult" class="actionresult"></div>
+    </div>
     <div id="taskbox" hidden>
       <div>Task for the next episodes: <b id="tasknow"></b></div>
       <form id="taskform"><input id="taskinput" maxlength="512" placeholder="type the task, e.g. put the red cube in the bowl">
@@ -477,7 +500,9 @@ function render(status) {
   $("mode").textContent = s.mode || (status.phase ? "starting" : "camera check");
   $("mode").className = "badge" + (s.mode === "live" ? " live" : "");
   const recording = !!s.recording;
-  $("rec").textContent = recording ? `REC  ${s.frames} frames, ${s.seconds.toFixed(1)} s` : (s.homing ? "homing" : "idle");
+  $("rec").textContent = recording ? `REC  ${s.frames} frames, ${s.seconds.toFixed(1)} s` : (s.homing ? (s.resetting ? "resetting" : "homing") : "idle");
+  $("sessionbox").hidden = !status.can_session;
+  if (status.can_session) renderSessionButtons(s);
   $("rec").className = "badge" + (recording ? " rec" : "");
   if (wasRecording === false && recording) beep(880, 1);                     // recording started
   if (lastCount !== null && s.episodes > lastCount) beep(1320, 2);           // saved
@@ -501,6 +526,53 @@ function render(status) {
   $("events").innerHTML = "";
   status.events.forEach((e) => { const li = document.createElement("li"); li.className = "mono"; li.textContent = e; $("events").appendChild(li); });
 }
+
+// The episode buttons: what each does when it can, and why not when it cannot (from the session's snapshot).
+const SESSION_BUTTONS = {start: "btn-start", save: "btn-save", discard: "btn-discard", reset: "btn-reset"};
+const SESSION_HELP = {
+  start: "Starts recording an episode, as A does",
+  save: "Saves the episode being recorded, as A does",
+  discard: "Throws away the episode being recorded, as B does",
+  reset: "MOVES both arms to Dream-1's home pose and opens the grippers; keep clear, the emergency stop halts them",
+};
+let autoResetChangedAt = 0;
+function sessionReasons(s) {
+  if (!s.mode) {
+    const none = "no session yet: press A on the right controller to open the arms";
+    return {start: none, save: none, discard: none, reset: none};
+  }
+  const moving = "the arms are moving to home: wait until they stop";
+  const dry = s.mode !== "live" ? "a dry run does not record" : "";
+  const idle = s.recording ? "" : "no episode is recording";
+  return {
+    start: dry || (s.recording ? "an episode is already recording" : (s.homing ? moving : "")),
+    save: dry || idle,
+    discard: dry || idle,
+    reset: !s.can_reset ? s.reset_note : (s.recording ? "save or discard the episode first" : (s.homing ? moving : "")),
+  };
+}
+function renderSessionButtons(s) {
+  const reasons = sessionReasons(s);
+  Object.entries(SESSION_BUTTONS).forEach(([action, id]) => {
+    $(id).disabled = !!reasons[action];
+    $(id).title = reasons[action] || SESSION_HELP[action];
+  });
+  const box = $("autoreset");
+  if (typeof s.auto_reset === "boolean" && Date.now() - autoResetChangedAt > 1500) box.checked = s.auto_reset;
+  const off = s.mode && !s.can_reset ? s.reset_note : "";
+  box.disabled = !!off;
+  $("autoresetlabel").title = off || "After an episode is saved, or discarded with B or Discard, the arms go to Dream-1's home";
+}
+Object.entries(SESSION_BUTTONS).forEach(([action, id]) => $(id).addEventListener("click", async () => {
+  $(id).disabled = true;
+  const reply = await postAction("/api/session", {action});
+  $("sessionresult").textContent = reply.ok ? `${reply.message} (the Events list says what happened)` : reply.message;
+}));
+$("autoreset").addEventListener("change", async () => {
+  autoResetChangedAt = Date.now();
+  const reply = await postAction("/api/session", {action: $("autoreset").checked ? "auto-reset-on" : "auto-reset-off"});
+  $("sessionresult").textContent = reply.message;
+});
 
 function renderEpisodes(episodes) {
   const present = new Set(episodes.map((e) => e.index));
