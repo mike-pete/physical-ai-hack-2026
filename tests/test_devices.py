@@ -557,3 +557,24 @@ def test_an_a_in_the_moment_everything_becomes_ready_does_not_open_the_arms(tmp_
         sleep=clock.sleep,
     )
     assert len(opened) == 1 and opened[0] - ready_at[0] > 3
+
+
+def test_a_makermods_station_may_mix_a_serial_and_a_socketcan_adapter(tmp_path):
+    path = filled_template("metal", tmp_path)
+    text = path.read_text().replace("gripper_open_deg: null", "gripper_open_deg: 110.0")
+    text = text.replace("gripper_closed_deg: null", "gripper_closed_deg: 0.0")
+    text = text.replace("port: /dev/serial/by-id/0\n", "port: can_follower_r\n")
+    path.write_text(text)  # the left arm keeps its serial adapter (its port line has a comment); the right is CAN
+    station = config.load(path)
+    assert station.arms["left"].port == "/dev/serial/by-id/0" and station.arms["right"].port == "can_follower_r"
+    assert config.arm_can_interface(station, "left") == "slcan"
+    assert config.arm_can_interface(station, "right") == "socketcan"
+
+    sys_net = tmp_path / "net"
+    _link(sys_net, "can_follower_r", flags="0x80")  # down
+    assert "is not there" in devices.arm_link_problem(station, "left", sys_net)  # checked as a serial adapter
+    assert devices.arm_link_problem(station, "right", sys_net) is not None  # checked as a CAN link
+    run = FakeRun()
+    ok, message = devices.apply_fix(station, "can-up:can_follower_r", sys_net, run)
+    assert ok and message == "brought can_follower_r up"
+    assert devices.apply_fix(station, "can-up:/dev/serial/by-id/0", sys_net, run)[0] is False  # never a serial port

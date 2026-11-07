@@ -35,7 +35,7 @@ arms:
     tcp_xyz_m: [0.0, 0.0, -0.1696387]  # Dream's tool point for the stock gripper (scripts/use_dream_tcp.py)
 
 makermods:
-  can_interface: slcan        # slcan (/dev/serial/... or /dev/ttyACM*) or socketcan (can0)
+  can_interface: slcan        # each arm follows its port: /dev/serial/... or /dev/ttyACM* is slcan, can0 socketcan
   urdf: ~/.cache/dream_hackathon/urdf/maker_arm.urdf  # scripts/fetch_urdf.py downloads it
   flange_link: link_007
   urdf_joints: [link_002_joint, link_003_joint, link_004_joint, link_005_joint, link_006_joint, link_007_joint]

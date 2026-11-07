@@ -161,6 +161,13 @@ def main() -> None:
     args = parser.parse_args()
     source = args.dataset.expanduser().resolve()
     target = (args.out or source.with_name(f"{source.name}-eef")).expanduser().resolve()
+    if not (source / "meta" / "info.json").is_file():
+        sys.exit(
+            f"{source}: no episode has been saved here yet. dhk-collect writes the dataset when its first episode is "
+            "saved, and a --dry-run session never records. In a live session press A to open the arms, then A to "
+            "start an episode and A again to save it (the terminal prints 'saved episode N'); Ctrl+C discards an "
+            "episode that is still recording."
+        )
     convert(source, target, args.arm, replace=args.replace)
 
     import dream

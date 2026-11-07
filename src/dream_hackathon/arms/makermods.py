@@ -67,7 +67,9 @@ class MakerModsArms:
             for side in ("left", "right"):
                 device = Follower(
                     FollowerConfig(
-                        port=station.arms[side].port, id=f"dream_hackathon_{side}", can_interface=mm.can_interface
+                        port=station.arms[side].port,
+                        id=f"dream_hackathon_{side}",
+                        can_interface=config.arm_can_interface(station, side),
                     )
                 )
                 self._open(device)

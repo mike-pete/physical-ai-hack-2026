@@ -67,7 +67,7 @@ Give the organizer the live command and the e-stop reminder. It records into a t
 uv run dhk-collect --config configs/station.yaml --dataset-dir ~/hackathon_data/station-test
 ```
 
-They drive both arms slowly, record two short episodes with A, and quit with Ctrl+C. Then check the result with `~/dream-env/bin/python tools/finetune.py ~/hackathon_data/station-test --arm <arm> --check`. On a Metal or Maker arm, run `tools/add_eef.py` on it first and check the `-eef` folder.
+They drive both arms slowly and record two short episodes: the first A only opens the arms, then A starts an episode and A again saves it (the terminal prints `saved episode 0`, then `saved episode 1`). They quit with Ctrl+C only after the second is saved: Ctrl+C discards an episode still recording, and a `--dry-run` session never records. Then check the result with `~/dream-env/bin/python tools/finetune.py ~/hackathon_data/station-test --arm <arm> --check`. On a Metal or Maker arm, run `tools/add_eef.py` on it first and check the `-eef` folder.
 
 ## 8. Hand-off
 

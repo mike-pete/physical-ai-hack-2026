@@ -113,14 +113,12 @@ def serial_port_problem(port: str) -> str | None:
 def arm_link_problem(station: config.StationConfig, side: str, sys_net: pathlib.Path = SYS_NET) -> str | None:
     """What keeps one arm's link (its CAN interface or its serial adapter) from being used, or None."""
     port = station.arms[side].port
-    return can_link_problem(port, sys_net) if over_socketcan(station) else serial_port_problem(port)
+    return can_link_problem(port, sys_net) if over_socketcan(station, side) else serial_port_problem(port)
 
 
-def over_socketcan(station: config.StationConfig) -> bool:
-    """Whether the arms' links are CAN interfaces (a YAM's, or a MakerMods station set to socketcan)."""
-    return station.family == "yam" or (
-        station.makermods is not None and station.makermods.can_interface == "socketcan"
-    )
+def over_socketcan(station: config.StationConfig, side: str) -> bool:
+    """Whether one arm's link is a CAN interface (a YAM's, or a MakerMods arm on a socketcan adapter)."""
+    return config.arm_can_interface(station, side) == "socketcan"
 
 
 def apply_fix(
@@ -139,7 +137,7 @@ def apply_fix(
     if not fix.startswith(CAN_UP_FIX):
         return False, f"unknown fix {fix!r}"
     port = fix.removeprefix(CAN_UP_FIX)
-    if not over_socketcan(station) or port not in {arm.port for arm in station.arms.values()}:
+    if port not in {arm.port for side, arm in station.arms.items() if over_socketcan(station, side)}:
         return False, f"{port!r} is not one of this station's arm links"
     state = can_link_state(port, sys_net)
     if state != "down":
@@ -263,7 +261,7 @@ class DeviceSet:
         for side in ("left", "right"):
             port = self._station.arms[side].port
             problem = arm_link_problem(self._station, side, self._sys_net)
-            can_up = over_socketcan(self._station) and can_link_state(port, self._sys_net) == "down"
+            can_up = over_socketcan(self._station, side) and can_link_state(port, self._sys_net) == "down"
             found.append(
                 Status(
                     f"{side} arm link",

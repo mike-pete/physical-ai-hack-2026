@@ -99,7 +99,8 @@ class MakerModsConfig:
     """MakerMods (Metal or Maker arm) settings.
 
     Attributes:
-    - can_interface: `slcan` or `socketcan`.
+    - can_interface: `slcan` or `socketcan`, as written in the config. Each arm is opened by its own port's kind
+      instead (#arm_can_interface), so one station may mix a serial CANable and a candleLight.
     - urdf: The arm's URDF, for the teleop IK.
     - flange_link: The URDF link the gripper is mounted on.
     - urdf_joints: The six URDF joints, base to wrist, in the follower's motor order.
@@ -146,6 +147,16 @@ class StationConfig:
     teleop: TeleopConfig
     yam: YamConfig | None
     makermods: MakerModsConfig | None
+
+
+def arm_can_interface(station: StationConfig, side: str) -> str:
+    """How one arm's CAN adapter is opened: `slcan` for a serial adapter (`/dev/serial/...`, `/dev/ttyACM*`),
+    `socketcan` for a CAN interface (`can0`, `can_follower_r`). Each arm follows its own port, so the two arms of a
+    MakerMods station may use different kinds of adapter; a YAM's arms are always CAN interfaces.
+    """
+    if station.family == "yam":
+        return "socketcan"
+    return "slcan" if station.arms[side].port.startswith("/dev/") else "socketcan"
 
 
 def load(path: str | pathlib.Path) -> StationConfig:
