@@ -171,8 +171,9 @@ No arms yet? On a YAM config, `uv run dhk-collect --config configs/yam.yaml --si
 | `src/dream_hackathon/devices.py` | Each device's state and its fix (Quest, cameras, the arms' links), for the dashboard and the terminal |
 | `src/dream_hackathon/station_lock.py` | One program drives the arms at a time (shared with `dreamcli`) |
 | `src/dream_hackathon/embodiments/` | The Dream embodiment configs your fine-tunes are registered with |
-| `configs/` | One template station config per arm type; a station's own is `configs/station.yaml` (not committed) |
+| `configs/` | One template station config per arm type; a station's own is `configs/station.yaml` (not committed). `configs/tasks/` describes a task for the task critic |
 | `tools/` | Dream API steps, run in the Dream library's environment: `add_eef.py`, `upload_dataset.py` (upload only), `finetune.py` |
+| `tools/task_critic.py`, `tools/critic_eval.py` | A task critic that judges from the cameras whether a run finished, and its evaluation on recorded runs ([docs/critic_eval.md](docs/critic_eval.md)); run with `uv run`, not in `~/dream-env` |
 | `scripts/` | Device checks, the URDF download, and station helpers: `use_dream_tcp.py` (Dream's tool point for Metal and Maker arms), `allow_can_bringup.sh` (the dashboard's CAN buttons), `remove_api_key.sh`, `wipe_station.sh` |
 | `docs/` | Collection, fine-tuning, running and setup guides |
 | `CLAUDE.md`, `.claude/skills/` | Claude Code's rules for this repo and the `station-setup` skill |
