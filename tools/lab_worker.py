@@ -193,6 +193,12 @@ class DreamBackend:
                     if got is not None and got.arbitration_id == joint.motor_id + damiao.REPLY_OFFSET:
                         states[joint.name] = damiao.decode_state(bytes(got.data), joint.model, time.monotonic())
                         break
+            if not states:
+                # Nothing answered: the arms are off, or the adapter re-enumerated under a power cycle and this
+                # handle is stale. Let it go so the next reading opens a fresh one.
+                self._monitor.pop(channel, None)
+                with contextlib.suppress(Exception):
+                    bus.shutdown()
             return states
         finally:
             self._arm_lock.release()
