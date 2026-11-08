@@ -80,6 +80,7 @@ class DreamBackend:
 
         self._bodies, self._config, self._followers = bodies, config, followers
         self._home, self._types, self._run = home, types, dream_run
+        self.on_problem = lambda text: print(text, file=sys.stderr)  # the worker swaps in an alert
         path = pathlib.Path(STATION_CONFIG).expanduser()
         if not path.is_file():
             raise RuntimeError(f"{path} is missing: the organizers run 'dreamcli setup' for the station")
@@ -110,16 +111,27 @@ class DreamBackend:
         with self._arm_lock:
             if self.arms and self.arms_ok():
                 return
-            self.arms = {}
+            if self.arms:
+                # Never open over arms this process still drives: a dead one may be powered, and the open would
+                # refuse it as "powered from an earlier session". Say which stopped and why.
+                dead = [
+                    f"{n}: {a.why_stopped() or 'it stopped answering'}"
+                    for n, a in self.arms.items()
+                    if not a.is_alive()
+                ]
+                raise RuntimeError(
+                    "an arm stopped (" + "; ".join(dead) + "). Support both arms, press Park & power off, then "
+                    "switch the arm's power off and on before using it again"
+                )
             opened = {}
             try:
                 for name, arm_config in (("left", self.app.follower_l), ("right", self.app.follower_r)):
                     opened[name] = self.body.open_arm(arm_config, name)
             except Exception as error:
                 self.fault_text = str(error)
-                for arm in opened.values():  # an arm left energized here would refuse the next open
+                for arm in opened.values():  # open() energizes nothing: just release the bus for the next try
                     with contextlib.suppress(Exception):
-                        arm.torque_off()
+                        arm.close()
                 raise
             self.arms = opened
 
@@ -163,7 +175,7 @@ class DreamBackend:
     def weightless(self) -> None:
         self._open_arms()
         if self._weightless is None:
-            self._weightless = _Weightless(self.arms, self._types)
+            self._weightless = _Weightless(self.arms, self._types, lambda text: self.on_problem(text))
         self._weightless.start()
 
     def hold(self) -> None:
@@ -263,8 +275,10 @@ class _Weightless:
     wherever they were left.
     """
 
-    def __init__(self, arms: dict[str, Any], types: Any) -> None:
+    def __init__(self, arms: dict[str, Any], types: Any, on_problem: Any = None) -> None:
         self._arms, self._types = arms, types
+        self._on_problem = on_problem or (lambda text: print(text, file=sys.stderr))
+        self._reported: set[str] = set()
         self._saved: dict[str, dict[str, tuple[float, float]]] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -294,7 +308,10 @@ class _Weightless:
                     gripper = min(max(state.gripper, 0.0), 1.0)
                     arm.write(self._types.ArmCommand(positions_rad=state.positions_rad, gripper=gripper))
                 except Exception as error:
-                    print(f"weightless: {error}", file=sys.stderr)
+                    text = f"weightless: {error}"
+                    if text not in self._reported:  # once per distinct problem, not 50 times a second
+                        self._reported.add(text)
+                        self._on_problem(text)
 
     def stop(self) -> None:
         if self._thread is None:
@@ -456,6 +473,7 @@ class Worker:
 
     def __init__(self, backend: Backend, frames_dir: pathlib.Path, events: Any) -> None:
         self.backend, self.frames_dir, self._events = backend, frames_dir, events
+        backend.on_problem = lambda text: self.emit(event="error", message=text)
         self._emit_lock = threading.Lock()
         self.state = "idle"
         self._run_task: asyncio.Task | None = None
