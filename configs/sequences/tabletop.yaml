@@ -1,0 +1,36 @@
+# A sequence for tools/sequence.py (docs/supervisor.md): three tasks in a row on one table. The arms go home after
+# every step, and the next step starts only when the one before has finished.
+#
+# This is a template. `uv run python tools/sequence.py check configs/sequences/tabletop.yaml` refuses it until
+# the prompts are yours and the two other task files exist: stack-blocks and golf-balls are written in their own
+# sessions, each with a vote gate, views and a `supervisor:` block like usb-cables.yaml's.
+
+# The model every step runs. Leave it out to use the station's own checkpoint.
+checkpoint: dreamlabs/dream-1-beta
+
+sequence:
+  # `name` labels the logs, the folders and the report (lowercase letters, digits, hyphens; unique).
+  # `task` is the task file, from the repository's folder. It defines the views, the vote gate and the limits.
+  # `prompt` is the first instruction the base model gets for this step. When the supervisor guides a step, the task
+  # file's own `prompts` list is the fallback for the retries.
+  # `attempt_s` and `max_attempts` (optional) replace the task file's values for this sequence only.
+  - name: unplug-cables
+    task: configs/tasks/usb-cables.yaml
+    prompt: "<your prompt for the cables>"
+  - name: stack-blocks
+    task: configs/tasks/stack-blocks.yaml
+    prompt: "<your prompt for the blocks>"
+  - name: golf-balls
+    task: configs/tasks/golf-balls.yaml
+    prompt: "<your prompt for the golf balls>"
+
+# What happens between steps. Home is the only choice in this version.
+between_steps: home
+
+# When a step uses all its attempts without being done: `continue` runs the next step anyway, `stop` ends the
+# sequence after the arms are home. The report marks a step that gave up either way.
+on_give_up: continue
+
+# `final` judges every task again from the last frames of the last run, once the last step has ended, and reports
+# whether the earlier tasks still look done. It only reports. `off` skips it.
+audit: final

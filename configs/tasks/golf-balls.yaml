@@ -1,0 +1,101 @@
+# The task critic's description of the golf-ball task: put the colorful golf balls into the basket and leave the
+# white ones alone (the first eight episodes of ~/hackathon_data/golf-balls; the other eleven are the orange-ball task).
+#
+# tools/task_critic.py reads this file. Only the VOTE GATE is set up for this task (`critic_eval.py run --gate gemini`):
+# it asks one plain question about a zoom on the table and the basket. The question gates (`--gate typesafe` and
+# `--gate claude`) read the `items`, `visibility`, `progress` and `failure_mode` sections below, but the progress levels
+# and the failure question in the code are worded for cables, so do not use those two gates on this file.
+
+name: golf-balls
+
+goal: >
+  Put the colorful golf balls into the basket, and leave the white golf balls where they are.
+
+# The number of colorful golf balls that start on the table. (The key is `cables` because the first task counted
+# cables; it counts this task's objects.) Three in the scenes of the demonstrations: orange, blue and light green.
+cables: 3
+
+cameras: [scene]
+
+# What part of the scene camera's picture goes to the critic, as fractions: [left, top, right, bottom]. The scene
+# camera also sees the people around the table, whose faces are in the upper part of the picture, so the crop starts
+# below them. What is cropped away is never sent anywhere. Check the crops with `critic_eval.py frames` first.
+crop:
+  scene: [0.28, 0.44, 0.98, 1.0]
+
+# The table with the basket and the places the balls start, enlarged so the balls (about 10 pixels across in the
+# camera's picture) can be told apart. It lies inside the crop above.
+views:
+  table:
+    camera: scene
+    box: [0.30, 0.46, 0.95, 0.92]
+    max_side: 1000
+
+# The vote gate: ONE plain question about the zoom, asked `repeats` times of the same picture. A picture is done when
+# every answer is yes, not done when every answer is no, unsure otherwise (look again). The question keeps the sentence
+# saying where the balls WERE at the start, which is what made the cable question work. It asks one thing: whether the
+# colorful balls are in the basket. It does NOT check that the white balls were left alone.
+vote_gate:
+  view: table
+  repeats: 2
+  answer_key: all_colorful_in_basket
+  question: |
+    Some colorful golf balls and some white golf balls lay on this table at the start, and the basket was empty. Look at the picture: are all the colorful golf balls now in the basket?
+    Reply with only a JSON object: {"all_colorful_in_basket": "yes" | "no" | "unsure", "reason": "one short sentence"}
+
+thresholds:
+  yes_at_least: 0.7
+  no_at_most: 0.3
+
+# Question-gate sections (not used by the vote gate; see the note at the top).
+items:
+  - id: none_outside_basket
+    question: "Is at least one colorful golf ball (not white) still lying on the table outside the basket in `scene`?"
+    done_when: "no"
+  - id: no_white_ball_in_basket
+    question: "Is a white golf ball in the basket in `scene`?"
+    done_when: "no"
+
+visibility:
+  id: basket_visible
+  question: "Is the whole basket visible in `scene`, with no arm or hand covering it?"
+  min: 0.5
+
+progress:
+  id: balls_outside_count
+  question: "How many colorful golf balls are lying on the table outside the basket in `scene`?"
+
+failure_mode:
+  min_probability: 0.5
+  min_fit: 0.5
+  types:
+    ball_not_grasped:
+      describe: "A colorful golf ball is still on the table and no gripper is holding it."
+      prompt: "Pick up the colorful golf ball that is still on the table and put it in the basket."
+    ball_dropped:
+      describe: "A colorful golf ball is on the floor, or has rolled away from the basket and the table."
+      prompt: "Pick up the colorful golf ball that fell and put it in the basket."
+    white_ball_moved:
+      describe: "A white golf ball is in the basket or was pushed out of its place."
+      prompt: "Put only the colorful golf balls into the basket and leave the white golf balls on the table."
+    stalled_or_idle:
+      describe: "Both arms are resting and a colorful golf ball is still on the table."
+      prompt: "Pick up a colorful golf ball from the table and put it in the basket."
+
+# The prompts to try. `text` is the exact --task. The first two are the words the demonstrations were recorded with.
+prompts:
+  - id: baseline
+    scene_start: full
+    text: "Place the colorful golf balls into the basket. Do not touch white balls."
+  - id: three
+    scene_start: full
+    text: "Place the three colorful golf balls into the basket. Do not touch white balls."
+  - id: short
+    scene_start: full
+    text: "Put the colorful golf balls in the basket."
+  - id: one_by_one
+    scene_start: full
+    text: "Pick up each colorful golf ball, one at a time, and put it in the basket. Leave the white balls."
+  - id: corrective
+    scene_start: partial
+    text: "One colorful golf ball is still on the table. Pick it up and put it in the basket."

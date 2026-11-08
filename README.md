@@ -171,8 +171,11 @@ No arms yet? On a YAM config, `uv run dhk-collect --config configs/yam.yaml --si
 | `src/dream_hackathon/devices.py` | Each device's state and its fix (Quest, cameras, the arms' links), for the dashboard and the terminal |
 | `src/dream_hackathon/station_lock.py` | One program drives the arms at a time (shared with `dreamcli`) |
 | `src/dream_hackathon/embodiments/` | The Dream embodiment configs your fine-tunes are registered with |
-| `configs/` | One template station config per arm type; a station's own is `configs/station.yaml` (not committed) |
+| `configs/` | One template station config per arm type; a station's own is `configs/station.yaml` (not committed). `configs/tasks/` describes a task for the task critic |
 | `tools/` | Dream API steps, run in the Dream library's environment: `add_eef.py`, `upload_dataset.py` (upload only), `finetune.py` |
+| `tools/task_critic.py`, `tools/critic_eval.py` | A task critic that judges from the cameras whether a run finished, and its evaluation on recorded runs ([docs/critic_eval.md](docs/critic_eval.md)); run with `uv run`, not in `~/dream-env` |
+| `tools/supervise.py`, `tools/station_io.py` | A supervisor that watches a live run through the station agent and the recorder's video, stops it when the critic says the task is done, and guides it with a corrected prompt when it is failing ([docs/supervisor.md](docs/supervisor.md)); `run` without `--observe-only` moves the arms, so a person runs it |
+| `tools/sequence.py`, `configs/sequences/` | The sequence layer: runs the supervisor over several tasks in a row on one table, the arms going home after each, then audits them all from the last frames ([docs/supervisor.md](docs/supervisor.md#running-several-tasks-in-a-row)); `run` without `--observe-only` moves the arms, so a person runs it |
 | `scripts/` | Device checks, the URDF download, and station helpers: `use_dream_tcp.py` (Dream's tool point for Metal and Maker arms), `allow_can_bringup.sh` (the dashboard's CAN buttons), `remove_api_key.sh`, `wipe_station.sh` |
 | `docs/` | Collection, fine-tuning, running and setup guides |
 | `CLAUDE.md`, `.claude/skills/` | Claude Code's rules for this repo and the `station-setup` skill |

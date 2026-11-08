@@ -1,0 +1,161 @@
+# The task critic's description of one task: unplug the orange USB cables from the power strip.
+#
+# tools/task_critic.py reads this file. Everything a person will want to tune lives here: the questions the critic
+# asks about the picture, the failure types with the prompt that corrects each, and the prompt matrix for the
+# recording runs. Keep the wording of the questions here, not in code (docs/critic_eval.md).
+
+name: usb-cables
+
+# The goal, in words, for the critic's prompt rewriter. It is not the prompt the robot is given.
+goal: >
+  Unplug each orange USB cable from the power strip and put the cables on the table, going from right to left.
+
+# How many orange cables start plugged in. CONFIRM with Mike by looking at a scene frame: the scene camera showed
+# three in the demonstrations.
+# Labelled by Mike on the demonstrations: four cables in every episode but episode 4, which has three.
+cables: 4
+
+# Which cameras the critic looks at, by name in the recording (a station's rollouts name the wrist cameras wrist_l
+# and wrist_r; the teleop demos call them left_wrist and right_wrist, and critic_eval maps one to the other).
+cameras: [scene]
+
+# What part of each camera's picture goes to the critic, as fractions of the picture: [left, top, right, bottom].
+# The scene camera also sees the people around the table, and what is cropped away is never sent anywhere. Check the
+# crops with `critic_eval.py frames` before the first run, and widen them only with the table and strip in view.
+crop:
+  scene: [0.28, 0.42, 0.88, 1.0]
+
+# Extra pictures cut from a camera, for gates that need detail: a zoom on one region, scaled so its longer side is
+# `max_side` pixels. The box is in fractions of the camera's picture and must lie inside that camera's crop above, so
+# a zoom never shows more than the crop does. The USB ports are a few pixels wide in the scene camera's picture, and
+# this zoom is what the vote gate below looks at: the strip and the cables around its port end.
+views:
+  strip:
+    camera: scene
+    box: [0.4531, 0.42, 0.6875, 0.8334]
+    max_side: 600
+
+# The vote gate (`critic_eval.py run --gate gemini`): ONE plain question about the zoom, asked `repeats` times of the
+# same picture. A picture is done when every answer is yes, not done when every answer is no, and unsure otherwise,
+# which means look again. A scene is the verdict of its pictures: done or not done when most agree and none
+# contradicts, unsure otherwise. The question keeps the sentence that says the cables WERE plugged in at the start: on
+# Claude it was the difference between 28 and 20 right answers out of 40, and it is the wording Gemini 4 Argon scored
+# 40 of 40 with, on the demonstrations. Do not add what an unplugged cable looks like: it made the models say
+# "unplugged" for cables that were plugged in. `answer_key` names the JSON key the reply must carry.
+vote_gate:
+  view: strip
+  repeats: 2
+  answer_key: all_four_unplugged
+  question: |
+    Four orange USB cables were plugged into this power strip at the start. Look at the picture: are all four cables now unplugged from the strip?
+    Reply with only a JSON object: {"all_four_unplugged": "yes" | "no" | "unsure", "reason": "one short sentence"}
+
+# The supervisor (`supervise.py`, docs/supervisor.md): what it does while a run is going. Every key has a default, so a
+# task file without this section still works. Times are seconds; the demonstrations last 33 to 83 s, hence 90.
+#   attempts         runs of the model before it gives up (the first guides in place, the second restarts)
+#   attempt_s        time limit of one attempt; the first guide extends it by guide_window_s
+#   warmup_s         no looks at the scene before this long into an attempt
+#   probe_every_s    seconds between looks; each look is frames_per_probe pictures spread over the last second
+#   done_probes      looks in a row that must say done (every vote yes) before it stops the run
+#   max_stalls       stalls the station may report in an attempt before that counts as a failure
+#   stuck_after_s    no progress for this long, with the arms commanded, is a failure (needs a look to confirm it)
+#   guide_window_s   a second failure this soon after a guide restarts the attempt instead of guiding again
+# `progress` says how to tell whether the task is moving, for any task: `object_motion` is the cheap one (how much the
+# pixels of one colour changed between two looks), `model_compare` the general one (Gemini sees two looks and the
+# goal). The motion alone never ends a run: a stall needs the compare to agree. Here the orange cables, in the strip
+# view, in Lab colour (L, a, b: the red-green channel `a` of 140 and up is the salmon of the cables and not the table).
+# Calibrated on the ten demonstrations: while the arms worked, the change between looks 10 s apart was 0.22 to 1.0, and
+# on a still scene about 0.01. Check it on your own station with `supervise.py check` and a few looks before trusting it.
+supervisor:
+  attempts: 3
+  attempt_s: 90
+  warmup_s: 15
+  probe_every_s: 10
+  frames_per_probe: 3
+  done_probes: 2
+  max_stalls: 3
+  stuck_after_s: 20
+  guide_window_s: 45
+  progress:
+    object_motion:
+      view: strip
+      color: {space: lab, low: [0, 140, 128], high: [255, 255, 255]}
+      min_change: 0.12
+    model_compare:
+      view: strip
+
+# A yes/no answer reads as yes at or above `yes_at_least` and as no at or below `no_at_most`; between the two the
+# picture does not settle the question (TypeSafe's suggested starting thresholds). The keys are not plain `yes` and
+# `no` because YAML reads those two words as true and false.
+thresholds:
+  yes_at_least: 0.7
+  no_at_most: 0.3
+
+# Atomic judgments about the picture. Each is one observable fact, phrased so that a person could answer it at a
+# glance. `done_when` says which answer means the task is done as far as this fact goes. Code, not the model, combines
+# them: the task is done when every fact is in its done state, not done when any fact is clearly not, and unsure
+# otherwise.
+items:
+  - id: none_plugged_in
+    question: "Is at least one orange cable still plugged into the power strip in `scene`?"
+    done_when: "no"
+  - id: none_off_the_table
+    question: >
+      Is any orange cable held in a gripper, or lying anywhere other than flat on the table, in `scene`?
+    done_when: "no"
+
+# The fact that tells whether the picture can be trusted: with the strip hidden by an arm, a "no cable plugged in"
+# says nothing. Below `min` the task is at best unsure, which is where a better viewpoint would help.
+visibility:
+  id: strip_visible
+  question: "Is the whole power strip visible in `scene`, with no arm, hand or cable hiding any part of it?"
+  min: 0.5
+
+# How many cables are still plugged in, for progress (reported, not used to decide). The levels are written out from
+# `cables` by the critic.
+progress:
+  id: plugged_in_count
+  question: "How many orange cables are plugged into the power strip in `scene`?"
+
+# Why the task is not done, and the prompt to give the robot to correct it. TypeSafe picks the failure type; the
+# prompt is copied from here (select, don't generate). A picture that fits none of them falls to the free-text
+# rewrite. These prompts are starting points for Mike to tune.
+failure_mode:
+  min_probability: 0.5  # the chosen type must be at least this likely
+  min_fit: 0.5          # and a separate yes/no question must say one of the types fits at all
+  types:
+    not_grasped:
+      describe: "An orange cable is still plugged into the power strip and no gripper is holding it."
+      prompt: "Pick up the orange USB cable that is still plugged into the power strip and pull it out."
+    grasped_not_pulled:
+      describe: "A gripper holds an orange cable that is still plugged into the power strip."
+      prompt: "Pull the orange USB cable straight out of the power strip and put it on the table."
+    dropped:
+      describe: "An orange cable is not on the table: it fell, is held up in the air, or is hanging off the edge."
+      prompt: "Pick up the orange USB cable that fell and put it flat on the table."
+    wrong_cable_or_order:
+      describe: "A cable on the left of the strip was unplugged while a cable to its right is still plugged in."
+      prompt: "Unplug the rightmost orange USB cable that is still plugged into the power strip."
+    stalled_or_idle:
+      describe: "Both arms are resting and orange cables are still plugged in."
+      prompt: "Unplug an orange USB cable from the power strip and put it on the table."
+
+# The prompt matrix for the recording runs. Mike edits this list: `id` names the prompt in labels.csv and the
+# report, `text` is the exact --task, and `scene_start` says what the table looks like at the start of the run
+# (full: every cable plugged in; partial: some already unplugged, to mimic a retry).
+prompts:
+  - id: baseline
+    scene_start: full
+    text: "Unplug each orange USB cable from the power strip and put them on the table. Go right to left"
+  - id: short
+    scene_start: full
+    text: "Unplug the orange USB cables."
+  - id: single_step
+    scene_start: full
+    text: "Unplug the rightmost orange USB cable from the power strip and put it on the table."
+  - id: constraint
+    scene_start: full
+    text: "Unplug all the orange USB cables one at a time, starting from the right."
+  - id: corrective
+    scene_start: partial
+    text: "One orange cable is still plugged in on the left. Unplug it and put it on the table."
