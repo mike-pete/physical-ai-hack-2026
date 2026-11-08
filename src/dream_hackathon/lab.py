@@ -204,7 +204,7 @@ class Lab:
 
     def _alert(self, text: str) -> None:
         self._alerts += 1
-        self.alerts = [*self.alerts[-(MAX_ALERTS - 1) :], {"id": self._alerts, "text": text}]
+        self.alerts = [*self.alerts[-(MAX_ALERTS - 1) :], {"id": self._alerts, "text": f"[{time.strftime('%H:%M:%S')}] {text}"}]
         print(f"ALERT: {text}")
 
     def _set(self, state: str, message: str) -> None:
