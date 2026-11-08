@@ -427,7 +427,8 @@ class GrowingVideo:
 
     A run's folder is `<time>_run<N>` under the rollouts directory, holding `rollout.json` (with `started_at_utc`) and
     `videos/chunk-000/observation.images.<camera>/episode_000000.partial.mp4`, which becomes `episode_000000.mp4`
-    when the run ends.
+    when the run ends. A change of prompt mid-run ends the episode and begins a new one in a folder of its own
+    (`<time>_run<N>_2`, `_3`, ...), so each read looks for the newest folder again and follows it.
     """
 
     def __init__(
@@ -446,11 +447,12 @@ class GrowingVideo:
         self._clock = clock
         self._since: datetime.datetime | None = None
         self._folder: pathlib.Path | None = None
+        self._pinned = False
         self._packets = 0
         self._grew_at: float | None = None
 
     def bind(self, since: datetime.datetime | None) -> None:
-        self._since, self._folder, self._packets, self._grew_at = since, None, 0, None
+        self._since, self._folder, self._pinned, self._packets, self._grew_at = since, None, False, 0, None
 
     @property
     def folder(self) -> pathlib.Path | None:
@@ -459,7 +461,7 @@ class GrowingVideo:
 
     def pin(self, folder: pathlib.Path) -> None:
         """Reads this run folder from now on, whatever `bind` said (the audit reads a finished run's last frames)."""
-        self._folder = pathlib.Path(folder)
+        self._folder, self._pinned = pathlib.Path(folder), True
         self._packets, self._grew_at = 0, None
 
     def find_run(self) -> pathlib.Path | None:
@@ -491,7 +493,7 @@ class GrowingVideo:
         return None
 
     def latest(self, count: int) -> list[Frame]:
-        folder = self._folder or self.find_run()
+        folder = self._folder if self._pinned else (self.find_run() or self._folder)
         if folder is None:
             raise SourceError(
                 f"no recording of this run in {self.rollouts_dir}: set rollouts.enabled: true in the station file "
@@ -500,7 +502,8 @@ class GrowingVideo:
         path = self.video_path(folder)
         if path is None:
             raise SourceError(f"{folder} has no video of camera {self.camera!r} yet")
-        self._folder = folder
+        if folder != self._folder:  # a new episode: its recording grows from nothing
+            self._folder, self._packets, self._grew_at = folder, 0, None
         window = max(count, math.ceil(self.window_s * 30) + 1)
         frames, packets, fps = read_tail(path, window)
         if packets != self._packets:

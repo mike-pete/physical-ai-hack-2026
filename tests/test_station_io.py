@@ -320,3 +320,43 @@ def test_replay_video_plays_against_the_clock_and_rests_on_the_last_picture(sio,
     clock.t = 31.0
     replay.bind(None)  # a restart: from the first picture again
     assert int(replay.latest(1)[0].bgr.mean()) < 60
+
+
+def test_growing_video_follows_a_new_episode_after_a_change_of_prompt(sio, tmp_path) -> None:
+    """The recorder ends an episode and begins another, in a folder of its own, when the prompt changes mid-run."""
+    now = datetime.datetime.now(datetime.UTC)
+    first = Recorder(make_run(tmp_path, "2026-11-08T12-00-00_run3", now))
+    first.add(range(30, 90, 2))
+    clock = Clock()
+    source = sio.GrowingVideo(tmp_path, "scene", clock=clock)
+    source.bind(now)
+    before = source.latest(1)[0]
+    assert source.folder.name == "2026-11-08T12-00-00_run3"
+    first.close()  # the old episode is finished
+
+    second_path = make_run(tmp_path, "2026-11-08T12-00-40_run3_2", now + datetime.timedelta(seconds=40))
+    clock.t = 40.0
+    with pytest.raises(sio.SourceError, match="no video of camera 'scene' yet"):
+        source.latest(1)  # the new folder has no video yet: it must not fall back to the old picture
+    second = Recorder(second_path)
+    try:
+        second.add([200] * 60)
+        frame = source.latest(1)[0]
+        assert source.folder.name == "2026-11-08T12-00-40_run3_2"
+        assert int(frame.bgr.mean()) > 150 > int(before.bgr.mean())  # the new episode's picture
+        assert source.stale_s() == 0.0  # and its recording is counted as growing from now
+    finally:
+        second.close()
+
+
+def test_a_pinned_growing_video_stays_on_its_folder(sio, tmp_path) -> None:
+    now = datetime.datetime.now(datetime.UTC)
+    old = make_run(tmp_path, "2026-11-08T12-00-00_run3", now)
+    recorder = Recorder(old)
+    recorder.add([40] * 40)
+    recorder.close()
+    Recorder(make_run(tmp_path, "2026-11-08T12-01-00_run4", now + datetime.timedelta(seconds=60))).close()
+    source = sio.GrowingVideo(tmp_path, "scene")
+    source.pin(old.parents[3])
+    assert int(source.latest(1)[0].bgr.mean()) < 80
+    assert source.folder == old.parents[3]

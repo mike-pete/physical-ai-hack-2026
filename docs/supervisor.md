@@ -61,7 +61,7 @@ rollouts:
   enabled: true
 ```
 
-and restart `dreamcli robot up` so it takes effect. `dir:` is optional (default `~/.dreamlabs/rollouts`). A dry run records nothing, so there is nothing to watch.
+and restart `dreamcli robot up` so it takes effect. `dir:` is optional (default `~/.dreamlabs/rollouts`). A dry run records nothing, so there is nothing to watch. A guide (`POST /prompt`) ends the recorder's episode and begins a new one in a folder of its own (`<time>_run<N>_2`), and the supervisor follows the newest folder, so the pictures after a guide are the new episode's.
 
 ## 2. Look first (no arms, nothing sent)
 
