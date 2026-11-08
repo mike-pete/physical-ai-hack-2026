@@ -147,7 +147,7 @@ The episodes after it are renumbered, so check `list` again before dropping anot
 
 ## Where your data is stored
 
-Your data stays on the station, in the folder you pass with `--dataset-dir` (without it, the folder the config's `dataset_dir` names). It is not in the repo, and nothing is uploaded until you fine-tune. Each folder is one LeRobot v2.1 dataset, and every session adds to it:
+Your data stays on the station, in the folder you pass with `--dataset-dir` (without it, the folder the config's `dataset_dir` names). It is not in the repo, and nothing is uploaded until you fine-tune or [send a copy to Dimensional's cloud](#keeping-a-copy-in-dimensionals-cloud). Each folder is one LeRobot v2.1 dataset, and every session adds to it:
 
 ```
 ~/hackathon_data/myteam-cubes/
@@ -177,6 +177,21 @@ To keep a copy on your laptop, run this on the laptop:
 ```bash
 scp -r <user>@<station>:hackathon_data/myteam-cubes .
 ```
+
+### Keeping a copy in Dimensional's cloud
+
+`tools/upload_dimensional.py` sends datasets to Dimensional's hosted storage with `dimos data upload`, and lists them in [console.dimensional.org](https://console.dimensional.org). It is separate from Dream: no fine-tuning, no charge, and the dataset folder stays as it is. You need Dimensional's `dimos` command and one login (`dimos login`: it prints a code you approve in any signed-in browser; `dimos` keeps the key, and the script never reads it).
+
+`dimos data upload` takes one file, so the script packs each dataset folder into a `<name>.tar` first (the same files, byte for byte, built the same way every time, so uploading the same dataset twice reports `already uploaded`). Upload the folders `dhk-collect` wrote, not the `-eef` ones `tools/add_eef.py` makes from them, which you can rebuild. It needs only Python 3.12 or newer:
+
+```bash
+# First see what would be sent: this packs and sends nothing
+python3 tools/upload_dimensional.py ~/hackathon_data/myteam-cubes --dry-run
+# Send it, keeping the output
+python3 tools/upload_dimensional.py ~/hackathon_data/myteam-cubes --log docs/dimensional_uploads/myteam-cubes.log
+```
+
+It checks the login first, uploads one dataset at a time (each tar is deleted after its upload), then runs `dimos data ls` and prints `confirmed` only when every tar is listed; otherwise it says `NOT CONFIRMED` and exits with an error. `dimos` prints a `console:` link for each upload. To get a dataset back on any computer, run `dimos data pull <id>` (the id is in `dimos data ls`), then `tar -xf` the file it writes.
 
 ## What the dataset holds
 
