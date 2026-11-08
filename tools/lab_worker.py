@@ -107,33 +107,50 @@ class DreamBackend:
                 out[reader.name] = frame.data
         return out
 
+    def _arm_configs(self) -> dict[str, Any]:
+        return {"left": self.app.follower_l, "right": self.app.follower_r}
+
     def _open_arms(self) -> None:
+        """Opens both arms, or none.
+
+        Dream's open energizes an arm, so a pair opened one after the other could leave the first one powered when
+        the second refuses (a gripper fault, say), and the next open would refuse that one as "still powered from an
+        earlier session". So both are first opened read-only, which energizes nothing and runs every start-up check;
+        only when both pass are they opened for real. If a real open still fails afterwards, the arms that did open
+        stay in `self.arms`, driven and held, for Park & power off to switch off: they are never dropped powered.
+        """
         with self._arm_lock:
-            if self.arms and self.arms_ok():
-                return
+            configs = self._arm_configs()
             if self.arms:
-                # Never open over arms this process still drives: a dead one may be powered, and the open would
-                # refuse it as "powered from an earlier session". Say which stopped and why.
+                if set(self.arms) == set(configs) and self.arms_ok():
+                    return
                 dead = [
                     f"{n}: {a.why_stopped() or 'it stopped answering'}"
                     for n, a in self.arms.items()
                     if not a.is_alive()
                 ]
+                missing = [n for n in configs if n not in self.arms]
+                what = "; ".join(dead + [f"{n}: not open" for n in missing])
                 raise RuntimeError(
-                    "an arm stopped (" + "; ".join(dead) + "). Support both arms, press Park & power off, then "
-                    "switch the arm's power off and on before using it again"
+                    f"the arms are not both running ({what}). Support both arms and press Park & power off; "
+                    "switch an arm's power off and on if it asks"
                 )
-            opened = {}
-            try:
-                for name, arm_config in (("left", self.app.follower_l), ("right", self.app.follower_r)):
-                    opened[name] = self.body.open_arm(arm_config, name)
-            except Exception as error:
-                self.fault_text = str(error)
-                for arm in opened.values():  # open() energizes nothing: just release the bus for the next try
+            check = getattr(self.body, "open_arm_read_only", None)
+            if check is not None:
+                for name, arm_config in configs.items():
+                    try:
+                        probe = check(arm_config, name)
+                    except Exception as error:
+                        self.fault_text = str(error)
+                        raise
                     with contextlib.suppress(Exception):
-                        arm.close()
-                raise
-            self.arms = opened
+                        probe.close()
+            for name, arm_config in configs.items():
+                try:
+                    self.arms[name] = self.body.open_arm(arm_config, name)
+                except Exception as error:
+                    self.fault_text = str(error)
+                    raise
 
     def clear_fault(self) -> str:
         """Sends Damiao's clear-error frame to the gripper of each arm whose open just failed on one, and reports.
@@ -170,7 +187,8 @@ class DreamBackend:
         return "cleared and re-read: " + "; ".join(notes) + ". Now press Weightless to try the arms again."
 
     def arms_ok(self) -> bool:
-        return bool(self.arms) and all(arm.is_alive() for arm in self.arms.values())
+        both = set(self.arms) == set(self._arm_configs())
+        return both and all(arm.is_alive() for arm in self.arms.values())
 
     def weightless(self) -> None:
         self._open_arms()
