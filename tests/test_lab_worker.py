@@ -176,4 +176,4 @@ def test_clear_fault_runs_and_the_state_settles(lw, tmp_path):
         return sink
 
     sink = asyncio.run(go())
-    assert sink.states() == ["idle"] and "nothing to clear" in sink.events[-1]["message"]
+    assert sink.states() == ["holding"] and "nothing to clear" in sink.events[-1]["message"]
