@@ -163,6 +163,9 @@ class Lab:
         self.cameras: list[str] = []
         self.run: dict[str, Any] | None = None
         self._run_started = 0.0
+        self.angles: dict[str, Any] = {}  # the Motors tab's last reading, per arm
+        self.angles_at = 0.0
+        self._watch_sent = 0.0
         self.alerts: list[dict[str, Any]] = []  # what went wrong, newest last; the page shows them until dismissed
         self._alerts = 0
         self._timer: threading.Timer | None = None
@@ -184,6 +187,8 @@ class Lab:
                 self._arm_timer()
             elif kind == "run_ended":
                 self._end_run(str(event.get("status") or "error"), str(event.get("error") or ""))
+            elif kind == "angles" and isinstance(event.get("arms"), dict):
+                self.angles, self.angles_at = event["arms"], time.monotonic()
             elif kind in ("error", "log"):
                 self.message = str(event.get("message") or "")
                 print(f"worker {kind}: {self.message}")
@@ -294,6 +299,17 @@ class Lab:
                 self._end_run("error", str(error))
                 raise
 
+    def watch_angles(self) -> dict[str, Any]:
+        """What the Motors tab polls; it also asks the worker to keep reading for a few seconds more."""
+        with self.lock:
+            now = time.monotonic()
+            if self.worker is not None and self.worker.alive() and now - self._watch_sent > 1.0:
+                self._watch_sent = now
+                with contextlib.suppress(lab_db.LabError):
+                    self.worker.send({"cmd": "watch"})
+            age = now - self.angles_at if self.angles_at else None
+            return {"arms": self.angles if age is not None and age < 5 else {}, "age_s": age, "state": self.state}
+
     def status(self) -> dict[str, Any]:
         """What the page polls."""
         with self.lock:
@@ -368,6 +384,8 @@ def make_handler(lab: Lab) -> type[http.server.BaseHTTPRequestHandler]:
                     return self._send(200, "text/html; charset=utf-8", PAGE_PATH.read_bytes())
                 if path == "/api/status":
                     return self._json(lab.status())
+                if path == "/api/angles":
+                    return self._json(lab.watch_angles())
                 if path == "/api/prompts":
                     return self._json(lab.store.prompts())
                 if path == "/api/runs":

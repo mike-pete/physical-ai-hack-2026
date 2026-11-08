@@ -72,6 +72,7 @@
     <nav>
       <button class="tab on" id="tab-prompts" data-tab="prompts">Prompts</button>
       <button class="tab" id="tab-runs" data-tab="runs">Runs</button>
+      <button class="tab" id="tab-motors" data-tab="motors">Motors</button>
     </nav>
     <button id="home-link" title="Back to the prompts page">Home</button>
   </header>
@@ -105,6 +106,12 @@
       <span class="muted">Weightless, place both arms, Hold here, then Run. A run starts from where the arms are.</span>
     </div>
     <div id="prompts" class="row" style="display:grid;gap:12px"></div>
+  </section>
+
+  <section id="view-motors" hidden>
+    <div class="muted" style="margin-bottom:10px">Live motor angles, in degrees from each motor's stored zero. Reading
+      only: opening this tab never powers or moves an arm. Red means outside the joint's range.</div>
+    <div class="row" id="motors" style="display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))"></div>
   </section>
 
   <section id="view-runs" hidden>
@@ -175,14 +182,65 @@ $('confirm-no').onclick = () => { pending = null; $('confirm').hidden = true; };
 $('confirm-yes').onclick = () => { const a = pending; pending = null; $('confirm').hidden = true; if (a) a(); };
 
 function show(tab) {
-  for (const t of ['prompts', 'runs']) {
+  for (const t of ['prompts', 'runs', 'motors']) {
     $('view-' + t).hidden = t !== tab;
     $('tab-' + t).classList.toggle('on', t === tab);
   }
   if (tab === 'runs') loadRuns();
+  motorsOn = tab === 'motors';
+  if (motorsOn) pollMotors();
 }
 document.querySelectorAll('.tab').forEach((b) => (b.onclick = () => show(b.dataset.tab)));
 $('home-link').onclick = () => { closePlayer(); show('prompts'); window.scrollTo(0, 0); };
+
+// ---- motors tab
+let motorsOn = false, motorsBusy = false;
+const TOL = 5;  // Dream accepts a motor this many degrees past a limit when it opens an arm
+async function pollMotors() {
+  if (!motorsOn || motorsBusy) return;
+  motorsBusy = true;
+  try { renderMotors(await (await fetch('/api/angles')).json()); } catch (e) { /* the status poll reports it */ }
+  motorsBusy = false;
+}
+setInterval(pollMotors, 250);
+function renderMotors(data) {
+  const root = $('motors');
+  const sides = ['left', 'right'];
+  if (!root.children.length) {
+    root.replaceChildren(...sides.map((side) => {
+      const d = document.createElement('div'); d.className = 'panel'; d.id = 'm-' + side;
+      d.innerHTML = '<div class="row"><strong class="grow">' + side + ' arm</strong><span class="muted" id="m-' + side
+        + '-src"></span></div><div class="muted" id="m-' + side + '-err"></div>'
+        + '<table><thead><tr><th>Joint</th><th>Angle</th><th>Range</th><th>State</th></tr></thead><tbody id="m-' + side
+        + '-rows"></tbody></table>';
+      return d;
+    }));
+  }
+  for (const side of sides) {
+    const arm = (data.arms || {})[side];
+    $('m-' + side + '-src').textContent = arm ? arm.source : 'waiting for the worker';
+    $('m-' + side + '-err').textContent = arm && arm.error ? arm.error : '';
+    $('m-' + side + '-err').style.color = 'var(--bad)';
+    const rows = $('m-' + side + '-rows');
+    const joints = arm ? arm.joints : [];
+    while (rows.children.length < joints.length) rows.append(document.createElement('tr'));
+    joints.forEach((j, i) => {
+      const out = j.deg !== null && (j.deg < j.low - TOL || j.deg > j.high + TOL);
+      const frac = j.deg === null ? 0 : Math.min(1, Math.max(0, (j.deg - j.low) / (j.high - j.low)));
+      const st = j.status === null ? 'no reply' : j.status === 0 ? 'limp' : j.status === 1 ? 'powered' : 'fault 0x' + j.status.toString(16);
+      const tr = rows.children[i];
+      tr.replaceChildren(...[j.name, j.deg === null ? '—' : j.deg.toFixed(1) + '°', j.low + ' to ' + j.high, st].map((c, k) => {
+        const td = document.createElement('td'); td.textContent = c;
+        if (k === 1) { td.style.fontVariantNumeric = 'tabular-nums'; if (out) td.style.color = 'var(--bad)'; td.style.fontWeight = '600'; }
+        if (k === 3 && (j.status === null || j.status > 1)) td.style.color = 'var(--bad)';
+        if (k === 2) { const bar = document.createElement('div'); bar.style.cssText = 'height:4px;background:var(--line);margin-top:3px;border-radius:2px';
+          const fill = document.createElement('div'); fill.style.cssText = 'height:4px;border-radius:2px;width:' + (frac * 100) + '%;background:' + (out ? 'var(--bad)' : 'var(--accent)');
+          bar.append(fill); td.append(bar); }
+        return td;
+      }));
+    });
+  }
+}
 
 // ---- arm controls
 $('b-weightless').onclick = () => post('/api/arms/weightless');

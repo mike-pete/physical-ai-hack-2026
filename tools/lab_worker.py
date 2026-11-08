@@ -25,6 +25,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import math
 import os
 import pathlib
 import signal
@@ -44,6 +45,9 @@ RECORD_FPS = 30
 SHUTDOWN_HOME_S = 8.0
 ## The Metal arm's gripper motor id on its CAN bus, and Damiao's clear-error command byte (an `FF*7 xx` frame).
 GRIPPER_CAN_ID = 7
+## The motors tab: how often the angles are read while a page watches, and how long a `watch` keeps that going.
+ANGLES_HZ = 4
+WATCH_S = 3.0
 CLEAR_ERROR = 0xFB
 ## Weightless: the joints' velocity gain, N.m s/rad. Position gain is 0, so the arm follows a hand freely; the
 ## velocity feedforward (the command tracks the measured pose) cancels most of this damping.
@@ -63,6 +67,7 @@ class Backend(Protocol):
     def home(self, seconds: float) -> bool: ...
     def power_off(self) -> None: ...
     def clear_fault(self) -> str: ...
+    def angles(self) -> dict[str, Any]: ...
     def arms_ok(self) -> bool: ...
     async def run(self, prompt: str, checkpoint: str, dry_run: bool, stop: asyncio.Event) -> None: ...
     def close(self) -> None: ...
@@ -81,6 +86,7 @@ class DreamBackend:
         self._bodies, self._config, self._followers = bodies, config, followers
         self._home, self._types, self._run = home, types, dream_run
         self.on_problem = lambda text: print(text, file=sys.stderr)  # the worker swaps in an alert
+        self._monitor: dict[str, Any] = {}
         path = pathlib.Path(STATION_CONFIG).expanduser()
         if not path.is_file():
             raise RuntimeError(f"{path} is missing: the organizers run 'dreamcli setup' for the station")
@@ -107,6 +113,83 @@ class DreamBackend:
                 out[reader.name] = frame.data
         return out
 
+    def angles(self) -> dict[str, Any]:
+        """Every motor's angle, per arm, for the Motors tab.
+
+        With the arms open it reads the states their own threads keep decoding (no bus traffic of ours). Otherwise it
+        sends state queries only (no enable, no command, nothing that moves or energizes a motor) over an adapter of
+        its own, which `_open_arms` closes before it opens the arms.
+        """
+        from robots import metal
+
+        out: dict[str, Any] = {}
+        for name, arm_config in self._arm_configs().items():
+            entry: dict[str, Any] = {"joints": [], "source": "", "error": ""}
+            try:
+                arm = self.arms.get(name)
+                chain = getattr(getattr(arm, "_driver", None), "chain", None) if arm is not None else None
+                if chain is not None and arm.is_alive():
+                    entry["source"] = "arm open"
+                    states = {j.name: chain.bus.motors[j.name].state for j in metal.JOINTS}
+                else:
+                    entry["source"] = "read only"
+                    states = self._raw_states(arm_config.can_channel)
+                for joint in metal.JOINTS:
+                    state = states.get(joint.name)
+                    entry["joints"].append(
+                        {
+                            "name": joint.name,
+                            "low": joint.limits_deg[0],
+                            "high": joint.limits_deg[1],
+                            "deg": None if state is None else round(state.position_deg, 2),
+                            "status": None if state is None else state.status,
+                            "temp_c": None if state is None else state.temp_rotor_c,
+                        }
+                    )
+            except Exception as error:
+                entry["error"] = f"{type(error).__name__}: {error}"
+                self._close_monitor()
+            out[name] = entry
+        return out
+
+    def _raw_states(self, channel: str) -> dict[str, Any]:
+        from robots import damiao, metal, robstride
+
+        if not self._arm_lock.acquire(blocking=False):  # an open is going on: skip this reading
+            return {}
+        try:
+            bus = self._monitor.get(channel)
+            if bus is None:
+                bus = self._monitor[channel] = robstride.open_can_bus(channel)
+            can = robstride.python_can()
+            states = {}
+            for joint in metal.JOINTS:
+                while bus.recv(timeout=0) is not None:
+                    pass
+                bus.send(
+                    can.Message(
+                        arbitration_id=damiao.PARAM_ID,
+                        data=damiao.refresh_payload(joint.motor_id),
+                        is_extended_id=False,
+                    ),
+                    timeout=0.2,
+                )
+                deadline = time.monotonic() + 0.03
+                while time.monotonic() < deadline:
+                    got = bus.recv(timeout=0.01)
+                    if got is not None and got.arbitration_id == joint.motor_id + damiao.REPLY_OFFSET:
+                        states[joint.name] = damiao.decode_state(bytes(got.data), joint.model, time.monotonic())
+                        break
+            return states
+        finally:
+            self._arm_lock.release()
+
+    def _close_monitor(self) -> None:
+        for bus in self._monitor.values():
+            with contextlib.suppress(Exception):
+                bus.shutdown()
+        self._monitor = {}
+
     def _arm_configs(self) -> dict[str, Any]:
         return {"left": self.app.follower_l, "right": self.app.follower_r}
 
@@ -120,6 +203,7 @@ class DreamBackend:
         stay in `self.arms`, driven and held, for Park & power off to switch off: they are never dropped powered.
         """
         with self._arm_lock:
+            self._close_monitor()  # the Motors tab's own adapter must not hold the port the arms need
             configs = self._arm_configs()
             if self.arms:
                 if set(self.arms) == set(configs) and self.arms_ok():
@@ -394,6 +478,24 @@ class FakeBackend:
     def clear_fault(self) -> str:
         return "fake: nothing to clear"
 
+    def angles(self) -> dict[str, Any]:
+        t = time.monotonic() - self._t0
+        names = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_yaw", "wrist_roll", "gripper")
+        limits = ((-160, 160), (-180, 0), (0, 180), (-123, 81), (-85, 85), (-145, 145), (0, 120))
+        arms = {}
+        for side, shift in (("left", 0.0), ("right", 1.0)):
+            joints = []
+            for i, (name, (low, high)) in enumerate(zip(names, limits, strict=True)):
+                mid, span = (low + high) / 2, (high - low) / 2
+                deg = mid + 0.4 * span * math.sin(t / 3 + i + shift)
+                if side == "right" and name == "elbow_flex":
+                    deg = -9.1
+                joints.append(
+                    {"name": name, "low": low, "high": high, "deg": round(deg, 2), "status": 0, "temp_c": 31.0}
+                )
+            arms[side] = {"joints": joints, "source": "fake", "error": ""}
+        return arms
+
     def arms_ok(self) -> bool:
         return True
 
@@ -497,6 +599,7 @@ class Worker:
         self._run_task: asyncio.Task | None = None
         self._stop_run = asyncio.Event()
         self._done = asyncio.Event()
+        self._watch_until = 0.0  # while a page looks at the Motors tab, the angles are read until this time
 
     def emit(self, **event: Any) -> None:
         with self._emit_lock:
@@ -510,7 +613,16 @@ class Worker:
     def _live_loop(self) -> None:
         """Writes each camera's latest frame for the page, LIVE_FPS times a second."""
         self.frames_dir.mkdir(parents=True, exist_ok=True)
+        next_angles = 0.0
         while not self._done.is_set():
+            now = time.monotonic()
+            if now < self._watch_until and now >= next_angles:
+                next_angles = now + 1.0 / ANGLES_HZ
+                try:
+                    self.emit(event="angles", arms=self.backend.angles())
+                except Exception as error:
+                    self.emit(event="error", message=f"motors: {error}")
+                    self._watch_until = 0.0
             for name, rgb in self.backend.frames().items():
                 try:
                     tmp = self.frames_dir / f".{name}.tmp"
@@ -542,7 +654,9 @@ class Worker:
 
     async def _handle(self, command: dict[str, Any]) -> None:
         name = command.get("cmd")
-        if name == "stop":
+        if name == "watch":
+            self._watch_until = time.monotonic() + WATCH_S
+        elif name == "stop":
             self._stop_run.set()
         elif self.state == "running":
             self.emit(event="log", message=f"{name} ignored: a run is going")

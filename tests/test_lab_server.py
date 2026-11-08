@@ -252,3 +252,13 @@ def test_a_failed_run_raises_an_alert_the_page_can_show(rig):
     the_lab.on_event({"event": "error", "message": "shutdown failed"})
     assert the_lab.status()["alert"]["id"] > alert["id"]
     assert get(port, "/api/status")[0] == 200
+
+
+def test_angles_are_served_and_ask_the_worker_to_watch(rig):
+    the_lab, port = rig
+    status, _, body = get(port, "/api/angles")
+    assert status == 200 and json.loads(body)["arms"] == {}
+    assert the_lab.worker.sent[-1] == {"cmd": "watch"}
+    arms = {"left": {"joints": [{"name": "elbow_flex", "deg": -9.1}], "source": "read only", "error": ""}}
+    the_lab.on_event({"event": "angles", "arms": arms})
+    assert json.loads(get(port, "/api/angles")[2])["arms"] == arms

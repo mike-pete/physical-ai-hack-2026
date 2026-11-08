@@ -177,3 +177,25 @@ def test_clear_fault_runs_and_the_state_settles(lw, tmp_path):
 
     sink = asyncio.run(go())
     assert sink.states() == ["holding"] and "nothing to clear" in sink.events[-1]["message"]
+
+
+def test_watch_makes_the_worker_emit_angles_only_while_watched(lw, tmp_path):
+    pytest.importorskip("cv2")
+
+    async def go():
+        sink = Sink()
+        worker = lw.Worker(lw.FakeBackend(), tmp_path / "frames", sink)
+        commands = asyncio.Queue()
+        task = asyncio.create_task(worker.serve(commands))
+        await asyncio.sleep(0.5)
+        before = sink.kinds().count("angles")
+        await worker._handle({"cmd": "watch"})
+        await asyncio.sleep(0.8)
+        commands.put_nowait({"cmd": "shutdown"})
+        await task
+        return before, sink
+
+    before, sink = asyncio.run(go())
+    assert before == 0 and sink.kinds().count("angles") >= 2
+    angles = next(e for e in sink.events if e["event"] == "angles")["arms"]
+    assert set(angles) == {"left", "right"} and len(angles["left"]["joints"]) == 7
