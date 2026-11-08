@@ -8,13 +8,10 @@ Usage (THE RIGHT ARM WILL MOVE — support it before starting):
         --config configs/station.yaml \\
         --task "pick up the red cube"
 
-    # The same with the left arm weightless (gravity compensation; Metal arms only, requires pinocchio). Without
-    # --gravity the left arm is opened torque-off and you carry its full weight. The dashboard and the console say
-    # which one is running, and an episode's start line repeats it.
-    uv run python scripts/mirror_collect.py \\
-        --config configs/station.yaml \\
-        --task "pick up the red cube" \\
-        --gravity
+    # On Metal arms the left arm is always weightless (gravity compensation, requires pinocchio), and Home drives it
+    # as well as the right arm to Dream's home. If gravity compensation cannot start, the left arm is opened torque-off
+    # instead: you carry its full weight, and Home moves only the right arm. The dashboard and the console say which
+    # one is running, and an episode's start line repeats it.
 
 Each task gets a dataset folder of its own, named after it, under --data-root (default ~/hackathon_data): the task
 above is saved in ~/hackathon_data/pick-up-the-red-cube. Type another task on the dashboard and press "Set Task" to
@@ -24,10 +21,10 @@ To record everything into one folder instead, give --dataset ~/hackathon_data/my
 Controls (type then Enter, or use the browser dashboard on http://localhost:8080):
     Enter   Start a new episode (idle) / save the current episode (recording)
     d       Discard the current episode
-    h       Return follower to home pose
+    h       Move both arms to Dream's home pose (the follower only, to where it started, without gravity compensation)
     q       Quit (saves active episode if one is running)
 
-The left arm is opened torque-off (or gravity-compensated with --gravity) — move it freely.
+The left arm is opened gravity-compensated on Metal arms (torque-off if that cannot start) — move it freely.
 The right arm is opened energized and tracks the left arm in real time.
 """
 
@@ -53,9 +50,14 @@ import numpy as np
 MOTORS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_yaw", "wrist_roll")
 GRIPPER = "gripper"
 
-## The homing ramp's joint speed (rad/s), and how close to home counts as home (radians).
-HOME_SPEED = 0.5
-HOME_TOLERANCE_RAD = 1e-3
+## Homing moves each joint at this fraction of the station's teleop.max_joint_speed_rad_s, so an arm on its way home
+## does not hit what is on the table. Home counts as reached within HOME_TOLERANCE_RAD of every joint (radians): a
+## motor under position control rarely settles closer than this, so a tighter bound runs out HOME_TIMEOUT_S every time.
+HOME_SPEED_FRACTION = 0.5
+HOME_TOLERANCE_RAD = 0.02
+## The MIT gains the gravity-compensated leader is driven home with: MetalLeader's default hold gains.
+LEADER_HOME_KP = 50.0
+LEADER_HOME_KD = 1.0
 ## Homing gives up after this long and mirroring resumes, so a joint that cannot reach home cannot lock the session.
 HOME_TIMEOUT_S = 30.0
 ## The task an episode records when none is given, and the longest task text Dream accepts (as in collect.py).
@@ -69,7 +71,7 @@ LEADER_GRAVITY_FAILED = "gravity_failed"
 _LEADER_MODE_TEXT = {
     LEADER_GRAVITY: "gravity compensation",
     LEADER_TORQUE_OFF: "torque off, no gravity compensation",
-    LEADER_GRAVITY_FAILED: "torque off, --gravity FAILED",
+    LEADER_GRAVITY_FAILED: "torque off, gravity compensation FAILED",
 }
 ## The dashboard reads at most this many bytes of a request body, and waits this long for a client's bytes.
 MAX_BODY_BYTES = 4096
@@ -142,6 +144,84 @@ def _home_step(
     if measured is None:
         return "hold", None
     return "move", measured + np.clip(home - measured, -max_step, max_step)
+
+
+def _home_both_step(
+    follower: np.ndarray | None,
+    follower_home: np.ndarray,
+    leader: np.ndarray | None,
+    leader_home: np.ndarray | None,
+    max_step: float,
+    elapsed_s: float,
+) -> tuple[Literal["reached", "timeout", "hold", "move"], np.ndarray | None, np.ndarray | None]:
+    """One tick of homing both arms, each ramped at the same capped speed.
+
+    @param follower The follower's joints in radians, or None when they could not be read this tick.
+    @param follower_home The follower's home.
+    @param leader The leader's joints in radians, or None when they could not be read this tick.
+    @param leader_home The leader's home, or None when the leader cannot be driven (only the follower homes).
+    @param max_step The most any joint may move this tick, in radians.
+    @param elapsed_s How long homing has been running.
+    @return (outcome, follower command, leader command). "reached" once both arms are home; "timeout" once either has
+        run out of time; "hold" while neither arm can be read; otherwise "move". An arm that is home keeps being
+        commanded to its home while the other arrives; a command is None for an arm whose joints are unknown.
+    """
+    outcomes = []
+    commands = []
+    for measured, home in ((follower, follower_home), (leader, leader_home)):
+        if home is None:
+            outcomes.append("reached")
+            commands.append(None)
+            continue
+        outcome, command = _home_step(measured, home, max_step, elapsed_s)
+        outcomes.append(outcome)
+        commands.append(home if outcome == "reached" else command)
+    if "timeout" in outcomes:
+        return "timeout", None, None
+    if outcomes == ["reached", "reached"]:
+        return "reached", None, None
+    if "move" not in outcomes:
+        return "hold", None, None
+    return "move", commands[0], commands[1]
+
+
+def _homing_frames(
+    commands: dict[str, tuple[float, float, float, float, float]], target_deg: dict[str, float] | None
+) -> dict[str, tuple[float, float, float, float, float]]:
+    """The MIT frames of a gravity tick, with the arm's joints driven to a target while homing.
+
+    @param commands Per motor, the (kp, kd, position in degrees, velocity, torque) a gravity tick wrote.
+    @param target_deg Per joint, where to drive it in degrees, or None to leave the frames alone (the gripper is never
+        in it, so it stays backdrivable).
+    @return The frames to send: the gravity torque stays, so the arm still carries its own weight.
+    """
+    if target_deg is None:
+        return commands
+    return {
+        motor: (LEADER_HOME_KP, LEADER_HOME_KD, target_deg[motor], 0.0, frame[4]) if motor in target_deg else frame
+        for motor, frame in commands.items()
+    }
+
+
+class _LeaderHoming:
+    """Lets a gravity-compensated MetalLeader be driven to a pose, which it cannot do on its own.
+
+    MetalLeader's gravity thread writes kp=0 frames, so it never pulls toward a position. This wraps its bus's
+    sync_write_metal to rewrite those frames while a target is set (see _homing_frames); with none set they pass
+    through unchanged.
+    """
+
+    def __init__(self, device) -> None:
+        self._target_deg: dict[str, float] | None = None
+        self._write = device.bus.sync_write_metal
+        device.bus.sync_write_metal = self._send
+
+    def set_target(self, joints_rad: np.ndarray | None) -> None:
+        """Drives the leader's six joints to these angles, or lets it go back to weightless with None."""
+        self._target_deg = None if joints_rad is None else {m: math.degrees(v) for m, v in zip(MOTORS, joints_rad, strict=True)}
+
+    def _send(self, commands: dict) -> None:
+        self._write(_homing_frames(commands, self._target_deg))
 
 
 def _episode_action(cmd: str, recording: bool) -> Literal["start", "save", "ignore"]:
@@ -591,10 +671,6 @@ def main() -> None:
     parser.add_argument("--leader", default="left", choices=["left", "right"], help="Which arm to move by hand")
     parser.add_argument("--follower", default="right", choices=["left", "right"], help="Which arm tracks the leader")
     parser.add_argument(
-        "--gravity", action="store_true",
-        help="Gravity compensation / weightless mode on the leader arm (Metal arms only; requires pinocchio).",
-    )
-    parser.add_argument(
         "--gravity-kd", type=float, default=0.0, metavar="KD",
         help="Velocity damping on the leader arm in gravity mode (default 0 = no resistance when moving).",
     )
@@ -661,29 +737,29 @@ def main() -> None:
     # ---- open leader arm (torque off or gravity-compensated)
     leader_cfg = station.arms[args.leader]
     leader_gravity = False
-    if args.gravity:
-        if station.arm != "metal":
-            print("--gravity is only supported for Metal arms; falling back to torque-off.")
-        else:
+    leader_homing: _LeaderHoming | None = None
+    gravity_asked = station.arm == "metal"  # Maker arms have no gravity mode
+    if gravity_asked:
+        try:
+            from lerobot.teleoperators.metal_leader import MetalLeader, MetalLeaderConfig
+            print(f"Opening {args.leader} arm (gravity compensation — weightless mode) ...")
+            kd_kwargs: dict = {}
             try:
-                from lerobot.teleoperators.metal_leader import MetalLeader, MetalLeaderConfig
-                print(f"Opening {args.leader} arm (gravity compensation — weightless mode) ...")
-                kd_kwargs: dict = {}
-                try:
-                    # Reduce velocity damping so the arm moves freely; not all versions expose kd.
-                    MetalLeaderConfig(port=leader_cfg.port, id="_probe", can_interface=mm.can_interface, kd=0.0)
-                    kd_kwargs = {"kd": args.gravity_kd}
-                except TypeError:
-                    pass
-                leader_dev = MetalLeader(MetalLeaderConfig(
-                    port=leader_cfg.port, id="mirror_leader", can_interface=mm.can_interface,
-                    hold_kp_on_disconnect=0.0, **kd_kwargs,
-                ))
-                leader_dev.connect()
-                leader_gravity = True
-                print(f"  {args.leader}: gravity compensation active — arm is weightless")
-            except Exception as e:
-                print(f"--gravity failed ({e}); falling back to torque-off.")
+                # Reduce velocity damping so the arm moves freely; not all versions expose kd.
+                MetalLeaderConfig(port=leader_cfg.port, id="_probe", can_interface=mm.can_interface, kd=0.0)
+                kd_kwargs = {"kd": args.gravity_kd}
+            except TypeError:
+                pass
+            leader_dev = MetalLeader(MetalLeaderConfig(
+                port=leader_cfg.port, id="mirror_leader", can_interface=mm.can_interface,
+                hold_kp_on_disconnect=0.0, **kd_kwargs,
+            ))
+            leader_dev.connect()
+            leader_gravity = True
+            leader_homing = _LeaderHoming(leader_dev)
+            print(f"  {args.leader}: gravity compensation active — arm is weightless")
+        except Exception as e:
+            print(f"gravity compensation failed ({e}); falling back to torque-off.")
 
     if not leader_gravity:
         print(f"Opening {args.leader} arm (torque off — leader) ...")
@@ -694,7 +770,7 @@ def main() -> None:
         leader_dev.bus.disable_torque()
         print(f"  {args.leader}: connected (torque off — move it by hand)")
 
-    leader_mode = _leader_mode(args.gravity, leader_gravity)
+    leader_mode = _leader_mode(gravity_asked, leader_gravity)
     leader_label = _leader_mode_label(leader_mode, args.leader)
     with dash_state.lock:
         dash_state.leader_mode = leader_mode
@@ -713,29 +789,39 @@ def main() -> None:
     FAMILY.prepare_leader_following(follower_dev)
     follower_dev.connect(calibrate=False)
     rest_poses = list(FAMILY.capture_rest_poses(follower_dev))
-    # Capture follower start joints (home pose) right after connect.
-    _home_degs = _read_follower_degs(follower_dev)
-    home_joints = np.radians([_home_degs[m] for m in MOTORS])
+    # Capture follower start joints right after connect.
+    _start_degs = _read_follower_degs(follower_dev)
+    start_joints = np.radians([_start_degs[m] for m in MOTORS])
     home_grip = 1.0  # open gripper at home
     print(f"  {args.follower}: connected (energized)")
 
-    # ---- move follower to home
-    print("Moving follower to home pose ...")
+    # ---- where Home goes: Dream's home for both arms; the follower's start pose when that is not possible
+    home_speed = HOME_SPEED_FRACTION * station.teleop.max_joint_speed_rad_s
+    follower_home, leader_home = start_joints, None
+    if leader_homing is None:
+        print("Home: the left arm is not driven (no gravity compensation): Home moves the follower to its start pose.")
+    else:
+        try:
+            dream_home = cfg.dream_home(station)
+            follower_home, leader_home = dream_home[args.follower], dream_home[args.leader]
+            print(f"Home: Dream's home for both arms, at {home_speed:.2f} rad/s.")
+        except cfg.ConfigError as e:
+            print(f"Home: {e}; Home moves the follower to its start pose, and the left arm stays where it is.")
+
+    # ---- hold the follower where it started (the target is where it already is, so this barely moves)
     dt_home = 1.0 / station.control_hz
+    settle_since = time.monotonic()
     while True:
         try:
             curr_degs = _read_follower_degs(follower_dev)
             curr_joints = np.radians([curr_degs[m] for m in MOTORS])
         except Exception:
             break
-        delta = home_joints - curr_joints
-        dist = float(np.max(np.abs(delta)))
-        if dist < 1e-3:
+        outcome, command = _home_step(curr_joints, start_joints, home_speed * dt_home, time.monotonic() - settle_since)
+        if outcome != "move":
             break
-        step = np.clip(delta, -HOME_SPEED * dt_home, HOME_SPEED * dt_home)
-        _command_follower(follower_dev, follower_cfg, curr_joints + step, home_grip, args.grip_extra)
+        _command_follower(follower_dev, follower_cfg, command, home_grip, args.grip_extra)
         time.sleep(dt_home)
-    print("  follower at home.")
 
     time.sleep(0.5)
 
@@ -817,25 +903,32 @@ def main() -> None:
             if _homing_now:
                 if homing_since is None:
                     homing_since = time.monotonic()
-                outcome, command = _home_step(
+                outcome, command, leader_command = _home_both_step(
                     follower_joints if follower_ok else None,
-                    home_joints,
-                    HOME_SPEED * dt,
+                    follower_home,
+                    leader_joints if leader_ok else None,
+                    leader_home,
+                    home_speed * dt,
                     time.monotonic() - homing_since,
                 )
                 if outcome == "move":
                     try:
-                        _command_follower(follower_dev, follower_cfg, command, home_grip, args.grip_extra)
+                        if command is not None:
+                            _command_follower(follower_dev, follower_cfg, command, home_grip, args.grip_extra)
+                        if leader_command is not None and leader_homing is not None:
+                            leader_homing.set_target(leader_command)
                     except Exception as e:
                         print(f"home step error: {e}")
                 elif outcome != "hold":
+                    if leader_homing is not None:
+                        leader_homing.set_target(None)
                     with dash_state.lock:
                         dash_state.homing = False
                     if outcome == "reached":
                         print("↩ Home reached.")
                     else:
                         print(
-                            f"↩ Homing gave up after {HOME_TIMEOUT_S:.0f} s; mirroring resumes where the arm stopped."
+                            f"↩ Homing gave up after {HOME_TIMEOUT_S:.0f} s; mirroring resumes where the arms stopped."
                         )
             else:
                 homing_since = None
@@ -923,7 +1016,7 @@ def main() -> None:
                     else:
                         with dash_state.lock:
                             dash_state.homing = True
-                        print("↩ Returning to home pose ...")
+                        print("↩ Moving to home pose ...")
                 elif cmd == "q":                    # quit
                     if episode is not None:
                         idx = _save_episode(episode)
@@ -948,6 +1041,8 @@ def main() -> None:
             print("\nCtrl+C — discarded active episode.")
         print("Stopping.")
     finally:
+        if leader_homing is not None:
+            leader_homing.set_target(None)
         print("Returning follower to start pose ...")
         for ok, reason in FAMILY.return_to_rest(rest_poses):
             if not ok:
