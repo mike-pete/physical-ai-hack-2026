@@ -303,8 +303,12 @@ class DreamBackend:
 
     def weightless(self) -> None:
         self._open_arms()
-        if self._weightless is None:
-            self._weightless = _Weightless(self.arms, self._types, lambda text: self.on_problem(text))
+        # Always built for the arms open now: one kept from before would still hold the arms that were let go, and
+        # the new ones would stay at their normal stiffness.
+        if self._weightless is not None:
+            with contextlib.suppress(Exception):
+                self._weightless.stop()
+        self._weightless = _Weightless(self.arms, self._types, lambda text: self.on_problem(text))
         self._weightless.start()
 
     def hold(self) -> None:
