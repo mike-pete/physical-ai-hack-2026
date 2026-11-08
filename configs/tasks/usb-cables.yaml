@@ -50,6 +50,40 @@ vote_gate:
     Four orange USB cables were plugged into this power strip at the start. Look at the picture: are all four cables now unplugged from the strip?
     Reply with only a JSON object: {"all_four_unplugged": "yes" | "no" | "unsure", "reason": "one short sentence"}
 
+# The supervisor (`supervise.py`, docs/supervisor.md): what it does while a run is going. Every key has a default, so a
+# task file without this section still works. Times are seconds; the demonstrations last 33 to 83 s, hence 90.
+#   attempts         runs of the model before it gives up (the first guides in place, the second restarts)
+#   attempt_s        time limit of one attempt; the first guide extends it by guide_window_s
+#   warmup_s         no looks at the scene before this long into an attempt
+#   probe_every_s    seconds between looks; each look is frames_per_probe pictures spread over the last second
+#   done_probes      looks in a row that must say done (every vote yes) before it stops the run
+#   max_stalls       stalls the station may report in an attempt before that counts as a failure
+#   stuck_after_s    no progress for this long, with the arms commanded, is a failure (needs a look to confirm it)
+#   guide_window_s   a second failure this soon after a guide restarts the attempt instead of guiding again
+# `progress` says how to tell whether the task is moving, for any task: `object_motion` is the cheap one (how much the
+# pixels of one colour changed between two looks), `model_compare` the general one (Gemini sees two looks and the
+# goal). The motion alone never ends a run: a stall needs the compare to agree. Here the orange cables, in the strip
+# view, in Lab colour (L, a, b: the red-green channel `a` of 140 and up is the salmon of the cables and not the table).
+# Calibrated on the ten demonstrations: while the arms worked, the change between looks 10 s apart was 0.22 to 1.0, and
+# on a still scene about 0.01. Check it on your own station with `supervise.py check` and a few looks before trusting it.
+supervisor:
+  attempts: 3
+  attempt_s: 90
+  warmup_s: 15
+  probe_every_s: 10
+  frames_per_probe: 3
+  done_probes: 2
+  max_stalls: 3
+  stuck_after_s: 20
+  guide_window_s: 45
+  progress:
+    object_motion:
+      view: strip
+      color: {space: lab, low: [0, 140, 128], high: [255, 255, 255]}
+      min_change: 0.12
+    model_compare:
+      view: strip
+
 # A yes/no answer reads as yes at or above `yes_at_least` and as no at or below `no_at_most`; between the two the
 # picture does not settle the question (TypeSafe's suggested starting thresholds). The keys are not plain `yes` and
 # `no` because YAML reads those two words as true and false.

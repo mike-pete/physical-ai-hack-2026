@@ -4,6 +4,8 @@ A **task critic** looks at the cameras after a robot run and says whether the ta
 
 The code is `tools/task_critic.py` (the critic) and `tools/critic_eval.py` (the evaluation). What the critic asks about the picture, how it zooms, and the prompts to try, are in `configs/tasks/usb-cables.yaml`. There are two ways to judge: **question gates** (TypeSafe or Claude answer several yes/no questions about the table, and the code combines them) and the **vote gate** (Gemini answers one plain question about a zoomed picture of the strip, several times, and the code counts the answers). Nothing here moves an arm except the recording runs in step 1, which are ordinary `dreamcli robot run` runs.
 
+To use the critic on a live run, to stop it when the task is done and guide it when it is failing, see [supervising a run](supervisor.md).
+
 ## Read this first
 
 - **Step 1 moves the arms.** It is the same real run as in [running your model](running_your_model.md#3-run-it): a hand on the emergency stop, everyone out of the arms' reach, and a dry run first when anything is new. A dry run saves nothing, so it does not record an episode.

@@ -140,6 +140,42 @@ class VoteGateSpec:
 
 
 @dataclasses.dataclass(frozen=True)
+class ObjectMotionSpec:
+    """A cheap progress detector: how much the pixels of one colour changed between two pictures of `view`.
+
+    `low` and `high` are an OpenCV range in `space` (`lab`, or `hsv` with hue 0 to 179; every channel 0 to 255 in
+    `lab`). Lab suits washed-out colours: the orange cables of the first task are salmon, and an HSV range that holds
+    them also holds the table, while Lab's red-green channel separates them cleanly. `min_change` is how different two
+    pictures' masks must be (0 identical, 1 nothing in common) for the task to count as having moved.
+    """
+
+    view: str
+    space: str
+    low: tuple[int, int, int]
+    high: tuple[int, int, int]
+    min_change: float
+
+
+@dataclasses.dataclass(frozen=True)
+class SupervisorSpec:
+    """What the supervisor (tools/supervise.py) needs from a task file. Every field has a default, so a task file
+    without a `supervisor:` section still gets a supervisor, with the model compare as its progress detector."""
+
+    attempts: int = 3
+    attempt_s: float = 90.0
+    warmup_s: float = 15.0
+    probe_every_s: float = 10.0
+    frames_per_probe: int = 3
+    done_probes: int = 2
+    max_stalls: int = 3
+    stuck_after_s: float = 20.0
+    guide_window_s: float = 45.0
+    object_motion: ObjectMotionSpec | None = None
+    compare_view: str | None = None  # the picture the model compare looks at; None: the first camera's crop
+    compare_question: str | None = None  # None: built from the task's goal
+
+
+@dataclasses.dataclass(frozen=True)
 class TaskSpec:
     """A task file, checked."""
 
@@ -162,6 +198,7 @@ class TaskSpec:
     prompts: tuple[PromptEntry, ...]
     views: Mapping[str, View] = dataclasses.field(default_factory=dict)
     vote_gate: VoteGateSpec | None = None
+    supervisor: SupervisorSpec = dataclasses.field(default_factory=SupervisorSpec)
 
 
 def _need(mapping: Mapping[str, Any], key: str, where: str, kind: type | tuple[type, ...]) -> Any:
@@ -179,6 +216,116 @@ def _fraction(value: Any, where: str) -> float:
     if not isinstance(value, int | float) or isinstance(value, bool) or not 0.0 <= value <= 1.0:
         raise TaskFileError(f"task file: {where} must be a number from 0 to 1, got {value!r}")
     return float(value)
+
+
+SUPERVISOR_KEYS = {
+    "attempts", "attempt_s", "warmup_s", "probe_every_s", "frames_per_probe", "done_probes", "max_stalls",
+    "stuck_after_s", "guide_window_s", "progress",
+}  # fmt: skip
+
+
+def _count(body: Mapping[str, Any], key: str, default: int, minimum: int) -> int:
+    value = body.get(key, default)
+    if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+        raise TaskFileError(f"task file: supervisor.{key} must be a whole number of at least {minimum}, got {value!r}")
+    return value
+
+
+def _seconds(body: Mapping[str, Any], key: str, default: float, minimum: float) -> float:
+    value = body.get(key, default)
+    if not isinstance(value, int | float) or isinstance(value, bool) or value < minimum:
+        raise TaskFileError(f"task file: supervisor.{key} must be a number of at least {minimum:g}, got {value!r}")
+    return float(value)
+
+
+def _color_range(value: Any, space: str, where: str) -> tuple[int, int, int]:
+    if not isinstance(value, list) or len(value) != 3 or not all(isinstance(v, int) for v in value):
+        raise TaskFileError(f"task file: {where} must be three whole numbers")
+    first, second, third = value
+    top = 179 if space == "hsv" else 255
+    if not (0 <= first <= top and 0 <= second <= 255 and 0 <= third <= 255):
+        raise TaskFileError(
+            f"task file: {where} must have the first number 0 to {top} and the others 0 to 255, got {value}"
+        )
+    return first, second, third
+
+
+def _parse_supervisor(raw: Mapping[str, Any], views: Mapping[str, View], cameras: Sequence[str]) -> SupervisorSpec:
+    """The `supervisor:` section, or the defaults when a task file has none.
+
+    @throws TaskFileError A key is unknown or wrong; the message names it.
+    """
+    body = raw.get("supervisor")
+    if body is None:
+        return SupervisorSpec()
+    if not isinstance(body, dict):
+        raise TaskFileError("task file: supervisor must be a mapping")
+    unknown = sorted(set(body) - SUPERVISOR_KEYS)
+    if unknown:
+        raise TaskFileError(
+            f"task file: supervisor has unknown keys {unknown}; known keys are {sorted(SUPERVISOR_KEYS)}"
+        )
+    defaults = SupervisorSpec()
+    values = {
+        "attempts": _count(body, "attempts", defaults.attempts, 1),
+        "attempt_s": _seconds(body, "attempt_s", defaults.attempt_s, 1),
+        "warmup_s": _seconds(body, "warmup_s", defaults.warmup_s, 0),
+        "probe_every_s": _seconds(body, "probe_every_s", defaults.probe_every_s, 1),
+        "frames_per_probe": _count(body, "frames_per_probe", defaults.frames_per_probe, 1),
+        "done_probes": _count(body, "done_probes", defaults.done_probes, 1),
+        "max_stalls": _count(body, "max_stalls", defaults.max_stalls, 0),
+        "stuck_after_s": _seconds(body, "stuck_after_s", defaults.stuck_after_s, 1),
+        "guide_window_s": _seconds(body, "guide_window_s", defaults.guide_window_s, 1),
+    }
+    for key in ("stuck_after_s", "guide_window_s"):
+        if values[key] < values["probe_every_s"]:
+            raise TaskFileError(
+                f"task file: supervisor.{key} cannot be shorter than probe_every_s ({values['probe_every_s']:g})"
+            )
+    progress = body.get("progress") or {}
+    if not isinstance(progress, dict) or set(progress) - {"object_motion", "model_compare"}:
+        raise TaskFileError("task file: supervisor.progress may hold only object_motion and model_compare")
+    motion = None
+    if progress.get("object_motion") is not None:
+        om = progress["object_motion"]
+        view = _need(om, "view", "supervisor.progress.object_motion.", str)
+        if view not in views:
+            raise TaskFileError(
+                f"task file: supervisor.progress.object_motion.view {view!r} is not one of views {list(views)}"
+            )
+        colour = _need(om, "color", "supervisor.progress.object_motion.", dict)
+        space = colour.get("space", "lab")
+        if space not in ("lab", "hsv"):
+            raise TaskFileError(
+                f"task file: supervisor.progress.object_motion.color.space must be lab or hsv, got {space!r}"
+            )
+        change = _need(om, "min_change", "supervisor.progress.object_motion.", int | float)
+        if not 0.0 < change <= 1.0:
+            raise TaskFileError(
+                f"task file: supervisor.progress.object_motion.min_change must be above 0 and at most 1, got {change}"
+            )
+        motion = ObjectMotionSpec(
+            view,
+            space,
+            _color_range(colour.get("low"), space, "supervisor.progress.object_motion.color.low"),
+            _color_range(colour.get("high"), space, "supervisor.progress.object_motion.color.high"),
+            float(change),
+        )
+    compare_view = compare_question = None
+    if progress.get("model_compare") is not None:
+        mc = progress["model_compare"]
+        if not isinstance(mc, dict):
+            raise TaskFileError("task file: supervisor.progress.model_compare must be a mapping")
+        compare_view = mc.get("view")
+        if compare_view is not None and compare_view not in [*cameras, *views]:
+            raise TaskFileError(
+                f"task file: supervisor.progress.model_compare.view {compare_view!r} is not a camera or a view"
+            )
+        compare_question = mc.get("question")
+        if compare_question is not None and (not isinstance(compare_question, str) or not compare_question.strip()):
+            raise TaskFileError("task file: supervisor.progress.model_compare.question must be a non-empty string")
+        compare_question = compare_question.strip() if compare_question else None
+    return SupervisorSpec(object_motion=motion, compare_view=compare_view, compare_question=compare_question, **values)
 
 
 def load_task(path: str | os.PathLike[str]) -> TaskSpec:
@@ -245,6 +392,7 @@ def load_task(path: str | os.PathLike[str]) -> TaskSpec:
         if not question:
             raise TaskFileError("task file: vote_gate.question must not be empty")
         vote_gate = VoteGateSpec(view, repeats, _need(body, "answer_key", "vote_gate.", str), question)
+    supervisor = _parse_supervisor(raw, views, cameras)
     thresholds = _need(raw, "thresholds", "", dict)
     yes = _fraction(_need(thresholds, "yes_at_least", "thresholds.", int | float), "thresholds.yes_at_least")
     no = _fraction(_need(thresholds, "no_at_most", "thresholds.", int | float), "thresholds.no_at_most")
@@ -309,6 +457,7 @@ def load_task(path: str | os.PathLike[str]) -> TaskSpec:
         prompts=prompts,
         views=views,
         vote_gate=vote_gate,
+        supervisor=supervisor,
     )
 
 
@@ -633,7 +782,9 @@ class TaskCritic:
         self.rewriter = rewriter
         self.rewrite_when_unsure = rewrite_when_unsure
 
-    def evaluate(self, image_sets: Sequence[Mapping[str, bytes]], history: Sequence[str] = ()) -> Verdict:
+    def evaluate(
+        self, image_sets: Sequence[Mapping[str, bytes]], history: Sequence[str] = (), *, rewrite: bool = True
+    ) -> Verdict:
         """Judges a scene from one or more sets of pictures (typically a few frames from the last second).
 
         A gate sees only the pictures it wants (the cameras for a question gate, the zoom for the vote gate); the
@@ -641,6 +792,8 @@ class TaskCritic:
 
         @param image_sets Each a mapping of picture name to JPEG bytes, as prepare_image() makes them.
         @param history The prompts already tried this session, oldest first.
+        @param rewrite False to judge only: no retry prompt is written (a supervisor probing a run in progress, where
+            "not done" is normal, asks for one with rewrite_prompt() only when it decides to guide).
         @throws CriticError A model call failed, or a set lacks a picture the gate wants. A failed call is an error,
             never an answer.
         """
@@ -658,9 +811,22 @@ class TaskCritic:
             frames = [judge(self.spec, a) for a in answers]
             result = judge(self.spec, aggregate(answers))
         prompt = source = None
-        if result.status == NOT_DONE or (result.status == UNSURE and self.rewrite_when_unsure):
+        if rewrite and (result.status == NOT_DONE or (result.status == UNSURE and self.rewrite_when_unsure)):
             prompt, source = self._rewrite(result, image_sets[-1], history)
         return Verdict(result, frames, prompt, source)
+
+    def rewrite_prompt(
+        self, result: Judgement, images: Mapping[str, bytes], history: Sequence[str]
+    ) -> tuple[str | None, str | None]:
+        """A prompt to retry with, for a decision already made: the failure type's prompt, the rewriter's, or the
+        task file's next prompt. The same guards as evaluate() applies.
+
+        @param result The decision (its failure type, or its votes' reasons, guide the rewriter).
+        @param images The pictures the rewriter sees, by name.
+        @param history The prompts already tried, oldest first.
+        @return `(prompt, source)`, or `(None, None)` when every prompt was tried.
+        """
+        return self._rewrite(result, images, history)
 
     def _rewrite(
         self, result: Judgement, images: Mapping[str, bytes], history: Sequence[str]
@@ -1079,6 +1245,75 @@ class GeminiRewriter(_Gemini):
 
     def rewrite(self, spec: TaskSpec, images: Mapping[str, bytes], history: Sequence[str], hint: str | None) -> str:
         return gemini_text(self._send(self.request(spec, images, history, hint)))
+
+
+def cut_pictures(spec: TaskSpec, frames: Mapping[str, np.ndarray]) -> dict[str, bytes]:
+    """The pictures of one moment, as the critic sees them: each camera's crop and each zoomed view.
+
+    @param spec The task file.
+    @param frames Each camera's whole frame (OpenCV, BGR), by the camera's name in the task file.
+    @return JPEG bytes by picture name.
+    @throws CriticError A camera of the task file has no frame.
+    """
+    missing = [c for c in spec.cameras if c not in frames]
+    if missing:
+        raise CriticError(f"no frame for camera {missing}")
+    pictures = {c: prepare_image(frames[c], spec.crop.get(c)) for c in spec.cameras}
+    for name, view in spec.views.items():
+        pictures[name] = prepare_image(frames[view.camera], view.box, target_side=view.max_side)
+    return pictures
+
+
+PROGRESS_KEY = "progress"
+
+
+class GeminiProgressCheck(_Gemini):
+    """The supervisor's model compare on Gemini: two pictures of the same scene a few seconds apart and the task's
+    goal in words; has anything changed that moves the goal forward? It works for any task with no setup."""
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = GEMINI_MODEL,
+        *,
+        post: Callable[..., dict[str, Any]] = post_json,
+        log: Callable[[dict[str, Any]], None] | None = None,
+    ):
+        super().__init__(api_key, model, post, log)
+
+    @staticmethod
+    def question(spec: TaskSpec, seconds: float) -> str:
+        """The question: the task file's own (with `{goal}` and `{seconds}` filled in), or one built from the goal."""
+        if spec.supervisor.compare_question:
+            return spec.supervisor.compare_question.replace("{goal}", spec.goal).replace("{seconds}", f"{seconds:.0f}")
+        return (
+            f"These two pictures show the same scene about {seconds:.0f} seconds apart while a robot works on this "
+            f"task: {spec.goal}\n"
+            "The first picture is the earlier one. Compare them. Did anything change that moves the task forward, "
+            "such as an object being moved, picked up, unplugged or put somewhere? The robot's own arms moving does "
+            "not count unless an object changed.\n"
+            f'Reply with only a JSON object: {{"{PROGRESS_KEY}": "yes" | "no" | "unsure", '
+            '"reason": "one short sentence"}'
+        )
+
+    def compare(self, spec: TaskSpec, before: bytes, after: bytes, seconds: float) -> Vote:
+        """Asks whether the task moved forward between two pictures.
+
+        @throws CriticError The call failed, or the reply is not yes, no or unsure.
+        """
+
+        def picture(jpeg: bytes) -> dict[str, Any]:
+            return {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(jpeg).decode()}}
+
+        parts = [
+            {"text": "The earlier picture:"},
+            picture(before),
+            {"text": "The later picture:"},
+            picture(after),
+            {"text": self.question(spec, seconds)},
+        ]
+        body = {"contents": [{"role": "user", "parts": parts}], "generationConfig": {"maxOutputTokens": 4096}}
+        return parse_vote(self._send(body), PROGRESS_KEY)
 
 
 GATE_SYSTEM = (

@@ -1,5 +1,7 @@
 """tools/task_critic.py: the decision rules, the prompt guards, the requests and the pictures. No model is called."""
 
+import base64
+import dataclasses
 import email.message
 import importlib.util
 import io
@@ -818,3 +820,143 @@ def test_a_gemini_prompt_that_repeats_one_already_tried_falls_back_to_the_task_l
     )
     verdict = critic.evaluate([{"scene": b"s", "strip": b"z"}], history=[spec.prompts[0].text])
     assert (verdict.rewrite_source, verdict.rewritten_prompt) == ("matrix", spec.prompts[1].text)
+
+
+# --- the supervisor section ------------------------------------------------------------------------------------
+
+
+def test_the_shipped_supervisor_section(tc, spec) -> None:
+    config = spec.supervisor
+    assert (config.attempts, config.attempt_s, config.warmup_s, config.probe_every_s) == (3, 90.0, 15.0, 10.0)
+    assert (config.frames_per_probe, config.done_probes, config.max_stalls) == (3, 2, 3)
+    assert (config.stuck_after_s, config.guide_window_s) == (20.0, 45.0)
+    motion = config.object_motion
+    assert (motion.view, motion.space, motion.low, motion.high, motion.min_change) == (
+        "strip", "lab", (0, 140, 128), (255, 255, 255), 0.12
+    )  # fmt: skip
+    assert config.compare_view == "strip" and config.compare_question is None
+
+
+def test_a_task_file_without_a_supervisor_section_gets_the_defaults(tc, tmp_path) -> None:
+    text = TASK_FILE.read_text()
+    start = text.index("supervisor:\n  attempts")
+    end = text.index("# A yes/no answer reads as yes")
+    bare = tmp_path / "bare.yaml"
+    bare.write_text(text[:start] + text[end:])
+    config = tc.load_task(bare).supervisor
+    assert config == tc.SupervisorSpec()
+    assert config.object_motion is None  # no colour, so the supervisor leans on the model compare alone
+
+
+def test_a_supervisor_section_may_hold_just_a_model_compare(tc, tmp_path) -> None:
+    text = TASK_FILE.read_text()
+    old = (
+        "    object_motion:\n      view: strip\n"
+        "      color: {space: lab, low: [0, 140, 128], high: [255, 255, 255]}\n      min_change: 0.12\n"
+    )
+    assert old in text
+    bare = tmp_path / "compare_only.yaml"
+    bare.write_text(text.replace(old, "", 1))
+    config = tc.load_task(bare).supervisor
+    assert config.object_motion is None and config.compare_view == "strip"
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        ("  attempts: 3\n", "  attempts: 0\n", "supervisor.attempts must be a whole number of at least 1"),
+        ("  attempts: 3\n", "  attempts: 3\n  bogus: 1\n", "unknown keys \\['bogus'\\]"),
+        ("  attempt_s: 90\n", "  attempt_s: -5\n", "supervisor.attempt_s must be a number of at least 1"),
+        ("  stuck_after_s: 20\n", "  stuck_after_s: 5\n", "stuck_after_s cannot be shorter than probe_every_s"),
+        ("  guide_window_s: 45\n", "  guide_window_s: 5\n", "guide_window_s cannot be shorter than probe_every_s"),
+        ("  done_probes: 2\n", "  done_probes: true\n", "done_probes must be a whole number"),
+        ("  progress:\n", "  progress:\n    telepathy: 1\n", "may hold only object_motion and model_compare"),
+        ("      view: strip\n      color", "      view: nowhere\n      color", "object_motion.view 'nowhere' is not"),
+        ("space: lab", "space: rgb", "color.space must be lab or hsv"),
+        ("space: lab", "space: hsv", "first number 0 to 179"),
+        ("low: [0, 140, 128]", "low: [0, 140]", "must be three whole numbers"),
+        ("min_change: 0.12", "min_change: 0", "min_change must be above 0"),
+        ("min_change: 0.12", "min_change: 1.5", "min_change must be above 0 and at most 1"),
+        ("    model_compare:\n      view: strip", "    model_compare:\n      view: nowhere", "not a camera or a view"),
+        ("    model_compare:\n      view: strip", "    model_compare:\n      question: ' '", "non-empty string"),
+    ],
+)  # fmt: skip
+def test_a_bad_supervisor_section_names_the_key(tc, tmp_path, old, new, message) -> None:
+    text = TASK_FILE.read_text()
+    assert text.count(old) >= 1, "the test's edit no longer matches the task file"
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(text.replace(old, new, 1))
+    with pytest.raises(tc.TaskFileError, match=message):
+        tc.load_task(bad)
+
+
+# --- what the supervisor asks of the critic --------------------------------------------------------------------
+
+
+def test_judging_without_a_rewrite_leaves_the_prompt_to_rewrite_prompt(tc, spec) -> None:
+    rewriter = FakeRewriter("Pull the cable out of the strip.")
+    critic = tc.TaskCritic(spec, FakeVoteGate(tc.Vote, ["no", "no"]), rewriter)
+    pictures = {"scene": b"s", "strip": b"z"}
+    verdict = critic.evaluate([pictures], history=["x"], rewrite=False)
+    assert verdict.result.status == "not_done"
+    assert verdict.rewritten_prompt is None and rewriter.calls == []  # nothing was asked of the rewriter
+    prompt, source = critic.rewrite_prompt(verdict.result, pictures, ["x"])
+    assert (prompt, source) == (rewriter.text, "claude")
+    assert rewriter.calls == [(["x"], "scripted")]  # the votes' reasons are its hint
+
+
+def test_rewrite_prompt_runs_the_same_guards_and_says_when_nothing_is_left(tc, spec) -> None:
+    tried = [p.text for p in spec.prompts]
+    critic = tc.TaskCritic(spec, FakeVoteGate(tc.Vote, ["no", "no"]), FakeRewriter(tried[0]))
+    verdict = critic.evaluate([{"strip": b"z"}], rewrite=False)
+    assert critic.rewrite_prompt(verdict.result, {"strip": b"z"}, tried) == (None, None)
+    prompt, source = critic.rewrite_prompt(verdict.result, {"strip": b"z"}, tried[:1])  # a repeat: use the list
+    assert (prompt, source) == (tried[1], "matrix")
+
+
+def test_cut_pictures_makes_the_scene_crop_and_the_zoom(tc, spec) -> None:
+    frame = np.full((360, 640, 3), 128, np.uint8)
+    pictures = tc.cut_pictures(spec, {"scene": frame})
+    assert sorted(pictures) == ["scene", "strip"]
+    strip = cv2.imdecode(np.frombuffer(pictures["strip"], np.uint8), cv2.IMREAD_COLOR)
+    assert max(strip.shape[:2]) == 600
+    scene = cv2.imdecode(np.frombuffer(pictures["scene"], np.uint8), cv2.IMREAD_COLOR)
+    assert min(scene.shape[:2]) >= 280  # scaled into the sizes TypeSafe takes
+    with pytest.raises(tc.CriticError, match="no frame for camera"):
+        tc.cut_pictures(spec, {"wrist_l": frame})
+
+
+def test_the_progress_question_is_built_from_the_goal_or_taken_from_the_task_file(tc, spec) -> None:
+    built = tc.GeminiProgressCheck.question(spec, 20.0)
+    assert spec.goal in built and "about 20 seconds apart" in built and '"progress"' in built
+    custom = dataclasses.replace(
+        spec, supervisor=dataclasses.replace(spec.supervisor, compare_question="Goal: {goal}. After {seconds} s?")
+    )
+    assert tc.GeminiProgressCheck.question(custom, 20.0) == f"Goal: {spec.goal}. After 20 s?"
+
+
+def test_the_progress_compare_sends_both_pictures_in_order_and_reads_the_vote(tc, spec) -> None:
+    posted = []
+
+    def post(url, headers, body):
+        posted.append((url, headers, body))
+        return gemini_reply('{"progress": "no", "reason": "Nothing moved."}')
+
+    vote = tc.GeminiProgressCheck("k", post=post).compare(spec, b"before", b"after", 20.0)
+    assert vote == tc.Vote("no", "Nothing moved.")
+    ((url, headers, body),) = posted
+    assert url.endswith(f"{tc.GEMINI_MODEL}:generateContent") and headers["x-goog-api-key"] == "k"
+    parts = body["contents"][0]["parts"]
+    assert [next(iter(p)) for p in parts] == ["text", "inline_data", "text", "inline_data", "text"]
+    assert [parts[0]["text"], parts[2]["text"]] == ["The earlier picture:", "The later picture:"]
+    assert base64.b64decode(parts[1]["inline_data"]["data"]) == b"before"
+    assert base64.b64decode(parts[3]["inline_data"]["data"]) == b"after"
+    assert parts[4]["text"] == tc.GeminiProgressCheck.question(spec, 20.0)
+
+
+def test_the_progress_compare_treats_a_bad_reply_and_a_missing_key_as_errors(tc, spec, monkeypatch) -> None:
+    with pytest.raises(tc.CriticError, match="not one of"):
+        tc.GeminiProgressCheck("k", post=lambda *a: gemini_reply('{"progress": "maybe"}')).compare(spec, b"a", b"b", 5)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    with pytest.raises(tc.CriticError, match="GEMINI_API_KEY"):
+        tc.GeminiProgressCheck()
