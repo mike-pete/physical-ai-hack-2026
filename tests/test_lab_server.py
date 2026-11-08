@@ -262,3 +262,27 @@ def test_angles_are_served_and_ask_the_worker_to_watch(rig):
     arms = {"left": {"joints": [{"name": "elbow_flex", "deg": -9.1}], "source": "read only", "error": ""}}
     the_lab.on_event({"event": "angles", "arms": arms})
     assert json.loads(get(port, "/api/angles")[2])["arms"] == arms
+
+
+def test_the_can_endpoint_serves_adapter_stats_and_kernel_events(rig, monkeypatch):
+    the_lab, port = rig
+    kernel = {"count": 2, "last": ["usb 6-1: reset full-speed USB device"], "error": ""}
+    monkeypatch.setattr(the_lab, "kernel_usb_events", lambda: kernel)
+    motors = [{"name": "elbow_flex", "queries": 4}]
+    can = {"channel": "/dev/ttyACM0", "tty": "ttyACM0", "present": True, "motors": motors}
+    the_lab.on_event({"event": "angles", "arms": {"left": {"joints": [], "source": "fake", "error": "", "can": can}}})
+    status, _, body = get(port, "/api/can")
+    data = json.loads(body)
+    assert status == 200 and data["kernel"] == kernel and data["arms"]["left"]["can"] == can
+    assert the_lab.worker.sent[-1] == {"cmd": "watch"}
+
+
+def test_kernel_events_degrade_to_an_error_when_journalctl_is_missing(rig, monkeypatch):
+    the_lab, _ = rig
+
+    def missing(*args, **kwargs):
+        raise FileNotFoundError("journalctl")
+
+    monkeypatch.setattr(lab.subprocess, "run", missing)
+    result = the_lab.kernel_usb_events()
+    assert result["count"] == 0 and "FileNotFoundError" in result["error"]

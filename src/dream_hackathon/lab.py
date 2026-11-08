@@ -166,6 +166,7 @@ class Lab:
         self.angles: dict[str, Any] = {}  # the Motors tab's last reading, per arm
         self.angles_at = 0.0
         self._watch_sent = 0.0
+        self._kernel: tuple[float, dict[str, Any]] | None = None
         self.alerts: list[dict[str, Any]] = []  # what went wrong, newest last; the page shows them until dismissed
         self._alerts = 0
         self._timer: threading.Timer | None = None
@@ -313,6 +314,27 @@ class Lab:
             age = now - self.angles_at if self.angles_at else None
             return {"arms": self.angles if age is not None and age < 5 else {}, "age_s": age, "state": self.state}
 
+    def kernel_usb_events(self) -> dict[str, Any]:
+        """USB resets and disconnects in the kernel log over the last ten minutes (best effort, cached a few s)."""
+        now = time.monotonic()
+        if self._kernel is not None and now - self._kernel[0] < 5:
+            return self._kernel[1]
+        try:
+            out = subprocess.run(
+                ["journalctl", "-k", "--no-pager", "-o", "short-iso", "--since", "10 minutes ago"],
+                capture_output=True,
+                text=True,
+                timeout=4,
+                check=False,
+            ).stdout
+            words = ("reset", "disconnect")
+            lines = [line for line in out.splitlines() if " usb " in line and any(w in line for w in words)]
+            result: dict[str, Any] = {"count": len(lines), "last": lines[-8:], "error": ""}
+        except (OSError, subprocess.SubprocessError) as error:
+            result = {"count": 0, "last": [], "error": f"{type(error).__name__}: {error}"}
+        self._kernel = (now, result)
+        return result
+
     def status(self) -> dict[str, Any]:
         """What the page polls."""
         with self.lock:
@@ -387,6 +409,8 @@ def make_handler(lab: Lab) -> type[http.server.BaseHTTPRequestHandler]:
                     return self._send(200, "text/html; charset=utf-8", PAGE_PATH.read_bytes())
                 if path == "/api/status":
                     return self._json(lab.status())
+                if path == "/api/can":
+                    return self._json({**lab.watch_angles(), "kernel": lab.kernel_usb_events()})
                 if path == "/api/angles":
                     return self._json(lab.watch_angles())
                 if path == "/api/prompts":

@@ -73,6 +73,7 @@
       <button class="tab on" id="tab-prompts" data-tab="prompts">Prompts</button>
       <button class="tab" id="tab-runs" data-tab="runs">Runs</button>
       <button class="tab" id="tab-motors" data-tab="motors">Motors</button>
+      <button class="tab" id="tab-can" data-tab="can">CAN</button>
     </nav>
     <button id="home-link" title="Back to the prompts page">Home</button>
   </header>
@@ -112,6 +113,17 @@
     <div class="muted" style="margin-bottom:10px">Live motor angles, in degrees from each motor's stored zero. Reading
       only: opening this tab never powers or moves an arm. Red means outside the joint's range.</div>
     <div class="row" id="motors" style="display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))"></div>
+  </section>
+
+  <section id="view-can" hidden>
+    <div class="muted" style="margin-bottom:10px">Each arm's CAN adapter: is the device there, which USB port and speed
+      (12 = USB 1.1 full speed is normal for a CANable), and how each motor answers. Reading only. Replies below 100%
+      or a rising "dropped" count mean the link is losing frames; kernel resets point at the USB hub or cable.</div>
+    <div class="row" id="can" style="display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))"></div>
+    <div class="panel" style="margin-top:12px">
+      <strong>Kernel USB resets and disconnects, last 10 minutes: <span id="can-kcount">?</span></strong>
+      <pre id="can-klog" class="muted" style="white-space:pre-wrap;overflow-x:auto;margin:6px 0 0"></pre>
+    </div>
   </section>
 
   <section id="view-runs" hidden>
@@ -182,16 +194,68 @@ $('confirm-no').onclick = () => { pending = null; $('confirm').hidden = true; };
 $('confirm-yes').onclick = () => { const a = pending; pending = null; $('confirm').hidden = true; if (a) a(); };
 
 function show(tab) {
-  for (const t of ['prompts', 'runs', 'motors']) {
+  for (const t of ['prompts', 'runs', 'motors', 'can']) {
     $('view-' + t).hidden = t !== tab;
     $('tab-' + t).classList.toggle('on', t === tab);
   }
   if (tab === 'runs') loadRuns();
   motorsOn = tab === 'motors';
   if (motorsOn) pollMotors();
+  canOn = tab === 'can';
+  if (canOn) pollCan();
 }
 document.querySelectorAll('.tab').forEach((b) => (b.onclick = () => show(b.dataset.tab)));
 $('home-link').onclick = () => { closePlayer(); show('prompts'); window.scrollTo(0, 0); };
+
+// ---- CAN tab
+let canOn = false, canBusy = false;
+async function pollCan() {
+  if (!canOn || canBusy) return;
+  canBusy = true;
+  try { renderCan(await (await fetch('/api/can')).json()); } catch (e) { /* the status poll reports it */ }
+  canBusy = false;
+}
+setInterval(pollCan, 1000);
+function cell(text, bad) {
+  const td = document.createElement('td'); td.textContent = text;
+  if (bad) td.style.color = 'var(--bad)';
+  return td;
+}
+function renderCan(data) {
+  const root = $('can');
+  const arms = data.arms || {};
+  root.replaceChildren(...['left', 'right'].map((side) => {
+    const d = document.createElement('div'); d.className = 'panel';
+    const can = (arms[side] || {}).can;
+    const head = document.createElement('div'); head.className = 'row';
+    head.innerHTML = '<strong class="grow">' + side + ' arm</strong>';
+    d.append(head);
+    if (!can) { const m = document.createElement('div'); m.className = 'muted'; m.textContent = 'waiting for the worker'; d.append(m); return d; }
+    const info = document.createElement('div'); info.className = 'muted'; info.style.margin = '4px 0 8px';
+    info.textContent = can.channel + ' (' + can.tty + ') ' + (can.present ? 'present' : 'MISSING') + ', USB '
+      + (can.usb_path || '?') + ', ' + (can.speed === null ? 'speed unknown' : can.speed + ' Mb/s');
+    if (!can.present) info.style.color = 'var(--bad)';
+    d.append(info);
+    const t = document.createElement('table');
+    t.innerHTML = '<thead><tr><th>Motor</th><th>Replies</th><th>Last</th><th>Worst</th><th>Dropped</th></tr></thead>';
+    const body = document.createElement('tbody');
+    for (const m of can.motors || []) {
+      const tr = document.createElement('tr');
+      const rate = m.queries ? Math.round((100 * m.replies) / m.queries) : null;
+      tr.append(cell(m.name),
+        cell(rate === null ? '—' : rate + '% (' + m.replies + '/' + m.queries + ')', rate !== null && rate < 100),
+        cell(m.last_ms == null ? '—' : m.last_ms + ' ms'),
+        cell(m.max_ms == null ? '—' : m.max_ms + ' ms'),
+        cell(m.drops == null ? '—' : String(m.drops), m.drops > 0));
+      body.append(tr);
+    }
+    t.append(body); d.append(t);
+    return d;
+  }));
+  const k = data.kernel || {};
+  $('can-kcount').textContent = k.error ? 'unavailable' : String(k.count);
+  $('can-klog').textContent = k.error || (k.last || []).join('\n') || 'none';
+}
 
 // ---- motors tab
 let motorsOn = false, motorsBusy = false;

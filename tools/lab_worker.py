@@ -81,6 +81,24 @@ class Backend(Protocol):
 # ---------------------------------------------------------------------- the real thing
 
 
+def adapter_info(channel: str) -> dict[str, Any]:
+    """What the kernel says about a CAN adapter's serial device: is it there, which USB port, at what speed."""
+    real = os.path.realpath(channel)
+    tty = os.path.basename(real)
+    info: dict[str, Any] = {
+        "channel": channel,
+        "tty": tty,
+        "present": os.path.exists(real),
+        "usb_path": "",
+        "speed": None,
+    }
+    with contextlib.suppress(Exception):
+        usb_device = os.path.dirname(os.path.realpath(f"/sys/class/tty/{tty}/device"))
+        info["usb_path"] = os.path.basename(usb_device)
+        info["speed"] = int(pathlib.Path(usb_device, "speed").read_text())
+    return info
+
+
 class DreamBackend:
     """Dream's own readers, arms and run loop, in this process."""
 
@@ -93,6 +111,7 @@ class DreamBackend:
         self.on_problem = lambda text: print(text, file=sys.stderr)  # the worker swaps in an alert
         self._monitor: dict[str, Any] = {}
         self._reported_dead: set[str] = set()
+        self._stats: dict[str, dict[str, dict[str, Any]]] = {}  # per adapter, per motor: the Motors/CAN tabs' counts
         path = pathlib.Path(STATION_CONFIG).expanduser()
         if not path.is_file():
             raise RuntimeError(f"{path} is missing: the organizers run 'dreamcli setup' for the station")
@@ -141,7 +160,8 @@ class DreamBackend:
 
         out: dict[str, Any] = {}
         for name, arm_config in self._arm_configs().items():
-            entry: dict[str, Any] = {"joints": [], "source": "", "error": ""}
+            can = adapter_info(arm_config.can_channel)
+            entry: dict[str, Any] = {"joints": [], "source": "", "error": "", "can": can}
             try:
                 arm = self.arms.get(name)
                 chain = getattr(getattr(arm, "_driver", None), "chain", None) if arm is not None else None
@@ -151,8 +171,17 @@ class DreamBackend:
                 else:
                     entry["source"] = "read only"
                     states = self._raw_states(arm_config.can_channel)
+                stats = self._stats.get(arm_config.can_channel, {})
                 for joint in metal.JOINTS:
                     state = states.get(joint.name)
+                    motor = chain.bus.motors[joint.name] if entry["source"] == "arm open" else None
+                    can.setdefault("motors", []).append(
+                        {
+                            "name": joint.name,
+                            "drops": None if motor is None else motor.drops,
+                            **({} if motor is not None else stats.get(joint.name, {})),
+                        }
+                    )
                     entry["joints"].append(
                         {
                             "name": joint.name,
@@ -180,7 +209,11 @@ class DreamBackend:
                 bus = self._monitor[channel] = robstride.open_can_bus(channel)
             can = robstride.python_can()
             states = {}
+            stats = self._stats.setdefault(channel, {})
             for joint in metal.JOINTS:
+                row = stats.setdefault(joint.name, {"queries": 0, "replies": 0, "last_ms": None, "max_ms": 0.0})
+                row["queries"] += 1
+                sent = time.monotonic()
                 while bus.recv(timeout=0) is not None:
                     pass
                 bus.send(
@@ -196,6 +229,9 @@ class DreamBackend:
                     got = bus.recv(timeout=0.01)
                     if got is not None and got.arbitration_id == joint.motor_id + damiao.REPLY_OFFSET:
                         states[joint.name] = damiao.decode_state(bytes(got.data), joint.model, time.monotonic())
+                        row["replies"] += 1
+                        row["last_ms"] = round((time.monotonic() - sent) * 1000, 1)
+                        row["max_ms"] = max(row["max_ms"], row["last_ms"])
                         break
             if not states:
                 # Nothing answered: the arms are off, or the adapter re-enumerated under a power cycle and this
@@ -538,7 +574,17 @@ class FakeBackend:
                 joints.append(
                     {"name": name, "low": low, "high": high, "deg": round(deg, 2), "status": 0, "temp_c": 31.0}
                 )
-            arms[side] = {"joints": joints, "source": "fake", "error": ""}
+            can = {
+                "channel": f"/dev/serial/by-id/fake-{side}",
+                "tty": "ttyACM0",
+                "present": True,
+                "usb_path": "5-1.2.1",
+                "speed": 12,
+                "motors": [
+                    {"name": j["name"], "queries": 40, "replies": 40, "last_ms": 1.2, "max_ms": 3.4} for j in joints
+                ],
+            }
+            arms[side] = {"joints": joints, "source": "fake", "error": "", "can": can}
         return arms
 
     def arms_ok(self) -> bool:
