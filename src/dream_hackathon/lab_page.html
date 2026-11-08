@@ -75,7 +75,7 @@
     <button id="home-link" title="Back to the prompts page">Home</button>
   </header>
 
-  <div id="alert" role="alert" hidden><span id="alert-text"></span><button id="alert-x">Dismiss</button></div>
+  <div id="alert" role="alert" hidden><span id="alert-text"></span><button id="alert-fix" hidden>Clear gripper fault</button><button id="alert-x">Dismiss</button></div>
 
   <section class="panel" id="live">
     <div class="row" style="margin-bottom:10px">
@@ -141,9 +141,11 @@ async function post(path, body) {
 let alertSeen = 0;
 function alertShow(text, id) {
   $('alert-text').textContent = text; $('alert').hidden = false;
+  $('alert-fix').hidden = !/gripper|fault|powered from an earlier session/i.test(text);
   if (id) alertSeen = id;
 }
 $('alert-x').onclick = () => { $('alert').hidden = true; };
+$('alert-fix').onclick = () => post('/api/arms/clear_fault');
 function say(text, err) { const m = $('msg'); m.textContent = text || ''; m.className = 'grow ' + (err ? 'err' : 'muted'); }
 
 function ask(text, action) {

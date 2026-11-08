@@ -167,3 +167,13 @@ def test_serve_announces_the_cameras_and_writes_live_frames(lw, tmp_path):
     ready = sink.events[0]
     assert ready["event"] == "ready" and ready["cameras"] == ["overhead", "wrist_l", "wrist_r"]
     assert (tmp_path / "frames" / "overhead.jpg").read_bytes()[:2] == b"\xff\xd8"
+
+
+def test_clear_fault_runs_and_the_state_settles(lw, tmp_path):
+    async def go():
+        worker, sink = make(lw, tmp_path)
+        await worker._handle({"cmd": "clear_fault"})
+        return sink
+
+    sink = asyncio.run(go())
+    assert sink.states() == ["idle"] and "nothing to clear" in sink.events[-1]["message"]

@@ -54,6 +54,7 @@ ALLOWED = {
     "hold": ("weightless",),
     "home": ("idle", "holding", "weightless"),
     "power_off": ("idle", "holding", "weightless"),
+    "clear_fault": ("idle", "holding"),
     "run": ("holding",),
     "stop": ("running",),
 }
@@ -258,6 +259,7 @@ class Lab:
                 "hold": "Holding the arms where they are.",
                 "home": "Moving the arms home, slowly.",
                 "power_off": "Parking the arms and switching them off.",
+                "clear_fault": "Clearing the gripper fault.",
                 "stop": "Stopping: the arms hold where they are.",
                 "run": "Running.",
             }[name]
@@ -483,6 +485,7 @@ def make_handler(lab: Lab) -> type[http.server.BaseHTTPRequestHandler]:
                 "/api/arms/hold": "hold",
                 "/api/arms/home": "home",
                 "/api/arms/power_off": "power_off",
+                "/api/arms/clear_fault": "clear_fault",
                 "/api/stop": "stop",
             }
             if path in commands:

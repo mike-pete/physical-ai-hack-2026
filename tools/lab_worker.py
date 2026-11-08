@@ -42,6 +42,9 @@ LIVE_MAX_WIDTH = 640
 RECORD_FPS = 30
 ## Where `shutdown` homes the arms before switching them off, seconds: slow, like the Home button.
 SHUTDOWN_HOME_S = 8.0
+## The Metal arm's gripper motor id on its CAN bus, and Damiao's clear-error command byte (an `FF*7 xx` frame).
+GRIPPER_CAN_ID = 7
+CLEAR_ERROR = 0xFB
 ## Weightless: the joints' velocity gain, N.m s/rad. Position gain is 0, so the arm follows a hand freely; the
 ## velocity feedforward (the command tracks the measured pose) cancels most of this damping.
 WEIGHTLESS_KD = 0.1
@@ -59,6 +62,7 @@ class Backend(Protocol):
     def hold(self) -> None: ...
     def home(self, seconds: float) -> bool: ...
     def power_off(self) -> None: ...
+    def clear_fault(self) -> str: ...
     def arms_ok(self) -> bool: ...
     async def run(self, prompt: str, checkpoint: str, dry_run: bool, stop: asyncio.Event) -> None: ...
     def close(self) -> None: ...
@@ -107,8 +111,51 @@ class DreamBackend:
             if self.arms and self.arms_ok():
                 return
             self.arms = {}
-            for name, arm_config in (("left", self.app.follower_l), ("right", self.app.follower_r)):
-                self.arms[name] = self.body.open_arm(arm_config, name)
+            opened = {}
+            try:
+                for name, arm_config in (("left", self.app.follower_l), ("right", self.app.follower_r)):
+                    opened[name] = self.body.open_arm(arm_config, name)
+            except Exception as error:
+                self.fault_text = str(error)
+                for arm in opened.values():
+                    with contextlib.suppress(Exception):
+                        arm.close()
+                raise
+            self.arms = opened
+
+    def clear_fault(self) -> str:
+        """Sends Damiao's clear-error frame to the gripper of each arm whose open just failed on one, and reports.
+
+        Only for arms that are not open, and it sends nothing that energizes or moves a motor. The arm's own open then
+        decides whether the motor is disabled and fine: this does not skip Dream's check.
+        """
+        if self.arms:
+            raise RuntimeError("the arms are open: use Park & power off first")
+        text = getattr(self, "fault_text", "")
+        configs = {"left": self.app.follower_l, "right": self.app.follower_r}
+        targets = [c for c in configs.values() if c.can_channel in text] or list(configs.values())
+        from robots import damiao, robstride
+
+        notes = []
+        for arm_config in targets:
+            channel, can_id = arm_config.can_channel, GRIPPER_CAN_ID
+            bus = robstride.open_can_bus(channel)
+            try:
+                message = robstride.python_can().Message(
+                    arbitration_id=can_id, data=b"\xff" * 7 + bytes([CLEAR_ERROR]), is_extended_id=False
+                )
+                bus.send(message, timeout=0.2)
+                reply = None
+                deadline = time.monotonic() + 0.5
+                while reply is None and time.monotonic() < deadline:
+                    got = bus.recv(timeout=0.05)
+                    if got is not None and got.arbitration_id == can_id + damiao.REPLY_OFFSET:
+                        reply = bytes(got.data)
+                notes.append(f"{channel[-24:]}: " + (f"gripper status {reply[0] >> 4}" if reply else "no reply"))
+            finally:
+                bus.shutdown()
+        self.fault_text = ""
+        return "cleared and re-read: " + "; ".join(notes) + ". Now press Weightless to try the arms again."
 
     def arms_ok(self) -> bool:
         return bool(self.arms) and all(arm.is_alive() for arm in self.arms.values())
@@ -309,6 +356,9 @@ class FakeBackend:
     def power_off(self) -> None:
         self._open = False
 
+    def clear_fault(self) -> str:
+        return "fake: nothing to clear"
+
     def arms_ok(self) -> bool:
         return True
 
@@ -474,6 +524,9 @@ class Worker:
         elif name == "power_off":
             await asyncio.to_thread(self.backend.power_off)
             self.set_state("idle", "the arms are off")
+        elif name == "clear_fault":
+            note = await asyncio.to_thread(self.backend.clear_fault)
+            self.set_state(self._settled(), note)
         elif name == "run":
             self._stop_run = asyncio.Event()  # before the task starts, so an early Stop is not lost
             self._run_task = asyncio.create_task(self._run(command), name="lab-run")

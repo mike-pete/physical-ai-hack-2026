@@ -177,6 +177,8 @@ def test_a_run_limit_must_be_sane(rig):
         ("/api/arms/home", "running", False),
         ("/api/arms/home", "homing", False),
         ("/api/arms/power_off", "holding", True),
+        ("/api/arms/clear_fault", "idle", True),
+        ("/api/arms/clear_fault", "weightless", False),
         ("/api/stop", "running", True),
         ("/api/stop", "holding", False),
     ],

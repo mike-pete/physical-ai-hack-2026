@@ -55,3 +55,7 @@ A fake worker produces test-pattern cameras and moves nothing; the station lock 
 Real runs move the arms: keep a hand on the emergency stop. The first time on a station, go in this order: start `dhk-lab` and check the three feeds; Weightless, move the arms by hand, Hold here; Home arms and watch the slow move; a prompt with Dry run; then the same prompt for real, and Stop.
 
 Weightless is built on Dream's motor driver internals (it drops the joints' stiffness and keeps gravity compensation on); if the library's version changes it may refuse with a message instead of going limp. Call the staff if a button does nothing.
+
+## "The gripper motor is not disabled (status 13)"
+
+An arm refused to open because its gripper motor latched a fault (13 is "lost contact with the computer": an earlier process stopped talking to it). The red banner then offers **Clear gripper fault**: it sends Damiao's clear-error frame to that arm's gripper and reports the status it reads back, then you press Weightless to try again. Dream's own check still decides whether the arm opens. If the fault stays, support the arm and switch its power off and on. This button is untested on hardware.
