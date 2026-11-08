@@ -126,7 +126,7 @@ dreamcli robot run --checkpoint <your model> --task "put the red cube in the bow
 dreamcli robot run --checkpoint <your model> --task "put the red cube in the bowl"
 ```
 
-On a YAM fine-tune, add `--action-space joint` to both; to run Dream-1 as it is, leave out `--checkpoint`.
+On a YAM fine-tune, add `--action-space joint` to both; to run Dream-1 as it is, leave out `--checkpoint`. The fine-tunes already made at this station, with their tasks, episode counts and run commands, are in [docs/trained_models.md](docs/trained_models.md).
 
 ### Build with the Dream API
 
@@ -174,7 +174,7 @@ No arms yet? On a YAM config, `uv run dhk-collect --config configs/yam.yaml --si
 | `configs/` | One template station config per arm type; a station's own is `configs/station.yaml` (not committed) |
 | `tools/` | Dream API steps, run in the Dream library's environment: `add_eef.py`, `upload_dataset.py` (upload only), `finetune.py` |
 | `scripts/` | Device checks, the URDF download, and station helpers: `use_dream_tcp.py` (Dream's tool point for Metal and Maker arms), `allow_can_bringup.sh` (the dashboard's CAN buttons), `remove_api_key.sh`, `wipe_station.sh` |
-| `docs/` | Collection, fine-tuning, running and setup guides |
+| `docs/` | Collection, fine-tuning, running and setup guides, and `trained_models.md` (the fine-tunes made at this station) |
 | `CLAUDE.md`, `.claude/skills/` | Claude Code's rules for this repo and the `station-setup` skill |
 
 Run the tests with `uv sync --group dream && uv run pytest` (no hardware needed).
