@@ -45,6 +45,7 @@ These models run only under the Dream account that made them (the API key in `~/
 - Close `dhk-collect`, `mirror_collect.py` and anything else that holds the arms: one program drives them at a time.
 - Do not move the cameras: the models learned which view is which.
 - Do not add `--action-space joint`; that is for YAM fine-tunes.
+- In every new terminal, turn on the Dream library's environment first with `source ~/dream-env/bin/activate`: `dreamcli` is installed there, and without it the shell answers `dreamcli: command not found`.
 
 **1. A dry run: the model answers and the arms do not move.** The Metal arms are opened with torque off, so support them by hand or let them rest. Pick the model's line:
 
@@ -71,6 +72,7 @@ The first call to a model that is not running waits while it starts, which can t
 
 ```bash
 # 🤖 on the station: REAL RUN, the arms move (hand on the emergency stop)
+source ~/dream-env/bin/activate
 dreamcli robot run --checkpoint <model id> --task "<task text>"
 ```
 

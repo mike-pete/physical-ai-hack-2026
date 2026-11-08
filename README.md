@@ -129,7 +129,7 @@ dreamcli robot run --checkpoint <your model> --task "put the red cube in the bow
 On a YAM fine-tune, add `--action-space joint` to both; to run Dream-1 as it is, leave out `--checkpoint`.
 ### Run a fine-tuned model
 
-The fine-tunes already made at this station are in [docs/trained_models.md](docs/trained_models.md): for each one, the task it was trained on and its number of episodes. They are Metal arm models, so there is no `--action-space joint`. A model runs only under the Dream account that made it (the key in `~/.dreamlabs/credentials`). Run it on the station, with the arms to themselves (close `dhk-collect` first), and do not move the cameras.
+The fine-tunes already made at this station are in [docs/trained_models.md](docs/trained_models.md): for each one, the task it was trained on and its number of episodes. They are Metal arm models, so there is no `--action-space joint`. A model runs only under the Dream account that made it (the key in `~/.dreamlabs/credentials`). Run it on the station, with the arms to themselves (close `dhk-collect` first), and do not move the cameras. `dreamcli` is installed in the Dream library's environment, so in every new terminal start with `source ~/dream-env/bin/activate`; without it the shell answers `dreamcli: command not found`.
 
 **1. List the models** (the arms do not move):
 
@@ -150,6 +150,7 @@ Examples, one per task (`--task` is the instruction the model was recorded with)
 
 ```bash
 # 🤖 on the station: DRY RUN, the arms do not move
+source ~/dream-env/bin/activate
 # unplug the orange USB cables from the power strip, right to left (10 episodes)
 dreamcli robot run --checkpoint dream-1-ft:c8fae656-cables-lf-1000 --task "Unplug each orange USB cable from the power strip and put them on the table. Go right to left" --dry-run
 # stack the blocks into a tower (14 episodes)
@@ -164,6 +165,7 @@ dreamcli robot run --checkpoint dream-1-ft:c8fae656-orange-1000 --task "pick up 
 
 ```bash
 # 🤖 on the station: REAL RUN, the arms move (hand on the emergency stop)
+source ~/dream-env/bin/activate
 dreamcli robot run --checkpoint <model id> --task "<task text>"
 ```
 
