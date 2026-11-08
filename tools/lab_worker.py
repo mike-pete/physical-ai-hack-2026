@@ -839,6 +839,7 @@ class Worker:
                 status = "stopped"
         except Exception as exc:
             status, error = "error", f"{type(exc).__name__}: {exc}"
+            logging.exception("run %s failed", run_id)  # the traceback goes to worker.log; the page shows one line
         finally:
             timer.cancel()
             await asyncio.to_thread(recorder.stop)
