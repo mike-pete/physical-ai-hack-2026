@@ -486,7 +486,10 @@ $('voice').onclick = async () => {
   try {
     const room = new LivekitClient.Room();
     room.on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {   // the agent's speech
-      if (track.kind === 'audio') { const el = track.attach(); el.dataset.voice = '1'; document.body.append(el); }
+      if (track.kind === 'audio') {
+        const el = track.attach(); el.dataset.voice = '1'; document.body.append(el);
+        $('voice').textContent = 'Voice on (click to end)'; say('Voice on: say "stop" or "stop and go home".', false);
+      }
     });
     room.on(LivekitClient.RoomEvent.Disconnected, () => {
       document.querySelectorAll('audio[data-voice]').forEach((a) => a.remove());
@@ -494,7 +497,8 @@ $('voice').onclick = async () => {
     });
     await room.connect(r.url, r.token);
     await room.localParticipant.setMicrophoneEnabled(true);
-    voiceRoom = room; $('voice').textContent = 'Voice on (click to end)'; say('Voice on: say "stop" or "stop and go home".', false);
+    voiceRoom = room; $('voice').textContent = 'Starting the agent… (click to end)';
+    say('Starting the voice agent: wait until it greets you before you speak (about 10 s).', false);
   } catch (e) { alertShow('Voice could not start: ' + e.message); }
 };
 

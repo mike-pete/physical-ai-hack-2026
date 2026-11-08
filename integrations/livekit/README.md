@@ -19,11 +19,11 @@ A browser button streams the microphone to LiveKit; this agent hears it and can 
 3. Start it on the station, beside `uv run dhk-lab`:
 
    ```
-   ~/voice-env/bin/python integrations/livekit/voice_agent.py dev
+   ~/voice-env/bin/python integrations/livekit/voice_agent.py start
    ```
 
 4. Open the lab in the browser (through `ssh -L 9100:localhost:9100`, so the page is on `localhost` and the browser
-   allows the microphone), press **Voice**, allow the microphone, and say "stop" or "stop and go home".
+   allows the microphone), press **Voice**, allow the microphone, wait until the agent greets you, and say "stop" or "stop and go home".
 
 The agent asks aloud whether everyone is clear before it moves the arms home. Models are set at the top of
 `voice_agent.py`.
