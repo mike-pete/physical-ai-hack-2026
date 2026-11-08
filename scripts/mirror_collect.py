@@ -30,6 +30,16 @@ Controls (type then Enter, or use the browser dashboard on http://localhost:8080
 
 The left arm is opened torque-off (or gravity-compensated with --gravity) — move it freely.
 The right arm is opened energized and tracks the left arm in real time.
+
+Star Arm 102 leader (Metal stations): a Star arm leads the right arm instead, and the left Metal arm rests torque off
+(support it or lay it down) and is recorded still. docs/star_leader.md is the guide.
+Calibrate the Star arm in makermodslab first (Metal arm, "Star Arm 102 leader"); its port is under
+/dev/serial/by-id (on the station a CH340: usb-1a86_USB_Serial-if00-port0):
+    uv run python scripts/mirror_collect.py --config configs/station.yaml --task "pick up the red cube" \\
+        --leader-device star --star-port /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 --star-id <name> \\
+        --leader left --follower right
+The right arm follows only once the Star arm is brought within ENGAGE_TOLERANCE_DEG of its pose on every joint
+(at start, and again after homing); until then it holds, and episodes cannot start.
 """
 
 import argparse
@@ -53,6 +63,11 @@ from typing import Any, Literal
 import cv2
 import numpy as np
 
+try:  # The Star Arm 102 leader's driver comes with the makermods extra; only --leader-device star needs it.
+    from lerobot.teleoperators.rebot_102_leader import RebotArm102Leader, RebotArm102LeaderMetalTeleopConfig
+except ImportError:
+    RebotArm102Leader = RebotArm102LeaderMetalTeleopConfig = None
+
 MOTORS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_yaw", "wrist_roll")
 GRIPPER = "gripper"
 
@@ -69,11 +84,22 @@ TASK_MAX_CHARS = 512
 LEADER_GRAVITY = "gravity"
 LEADER_TORQUE_OFF = "torque_off"
 LEADER_GRAVITY_FAILED = "gravity_failed"
+## With --leader-device star a Star Arm 102 leads the follower, and the other Metal arm rests torque off and is
+## recorded as it is: still, so a model trained on the episodes keeps that arm still too.
+LEADER_STAR = "star"
 _LEADER_MODE_TEXT = {
     LEADER_GRAVITY: "gravity compensation",
     LEADER_TORQUE_OFF: "torque off, no gravity compensation",
     LEADER_GRAVITY_FAILED: "torque off, --gravity FAILED",
+    LEADER_STAR: "follows the Star Arm 102 leader",
 }
+## A Star leader takes over the follower only once each of its joints is within this many degrees of the follower's,
+## so the follower never jumps to wherever the Star arm happens to be (at start, and after homing).
+ENGAGE_TOLERANCE_DEG = 15.0
+## This many failed Star reads in a row disengage it, so after the outage it must come back through the gate above.
+STAR_MAX_READ_FAILURES = 3
+## An unreliable single Star read is trusted when its raw angle is this close to the value the servo library held.
+STAR_GLITCH_TOLERANCE_DEG = 10.0
 ## The dashboard reads at most this many bytes of a request body, and waits this long for a client's bytes.
 MAX_BODY_BYTES = 4096
 REQUEST_TIMEOUT_S = 5
@@ -102,6 +128,130 @@ def _read_leader_degs(device, gravity: bool) -> dict[str, float]:
         action = device.get_action()
         return {m: float(action[f"{m}.pos"]) for m in (*MOTORS, GRIPPER)}
     return {m: float(device.bus.read("Present_Position", m)) for m in (*MOTORS, GRIPPER)}
+
+
+def _read_star_single(device, motor: str, servo_id: int) -> float:
+    """A Star servo's multi-turn angle from a single read, for a servo the sync read missed; raises if that fails.
+
+    The servo library marks a reading near 0 deg unreliable (its filter takes it for a power-cycle A->0->B glitch)
+    and holds the last value, yet the servo did answer: a read that gets no answer raises instead. Probed on the
+    station's Star arm, a joint resting at its calibrated zero reads unreliable every tick while its raw angle keeps
+    changing. So an unreliable read is trusted when its raw angle is within STAR_GLITCH_TOLERANCE_DEG of the held
+    one, which a real glitch (raw jumps to 0 from far away) is not.
+    """
+    try:
+        sample = device.bus.read_angle(servo_id, multi_turn=True)
+    except Exception as e:
+        raise RuntimeError(f"Star servo {motor} (id={servo_id}) did not answer ({e})") from e
+    raw = float(sample.raw_deg)
+    if not sample.reliable and abs(raw - float(sample.filtered_deg)) > STAR_GLITCH_TOLERANCE_DEG:
+        raise RuntimeError(
+            f"Star servo {motor} (id={servo_id}) read {raw:.1f} deg, {sample.filtered_deg:.1f} deg before: a glitch"
+        )
+    return raw
+
+
+def _read_star_degs(device) -> dict[str, float]:
+    """The Star leader's joints and gripper in the Metal follower's degrees, as its Metal preset maps them.
+
+    The same mapping as `RebotArm102Leader.get_action()` (unwrap each servo's multi-turn angle into the window its
+    follower range implies, scale, clamp to the range), except that a servo that did not answer this tick raises here.
+    get_action() repeats the last reading instead, and so does `_read_raw_positions()`: the servo bus's sync_monitor
+    hands back the last good angle, marked reliable=False, for a servo that missed this cycle. Either would be
+    commanded and recorded as if it were fresh.
+
+    A servo the sync read marked unreliable is read again on its own (`_read_star_single`): on the station's Star arm
+    that happens whenever a joint rests within about 1 deg of its calibrated zero.
+    """
+    ids = device.config.joint_ids
+    monitors = device.bus.sync_monitor(list(ids.values()))
+    ranges, directions = device.config.joint_ranges, device.config.joint_directions
+    degs = {}
+    for motor in (*MOTORS, GRIPPER):
+        monitor = monitors.get(ids[motor])
+        if monitor is not None and monitor.reliable:
+            angle = monitor.angle_deg
+        else:
+            angle = _read_star_single(device, motor, ids[motor])
+        low, high = ranges[motor]
+        direction = directions[motor]
+        unwrapped, _turns = device._round_to_valid_range(angle, low / direction, high / direction)
+        degs[motor] = max(float(low), min(float(high), unwrapped * direction))
+    return degs
+
+
+def _joint_offset_deg(a_rad: np.ndarray, b_rad: np.ndarray) -> float:
+    """The largest difference between two arms' joints (gripper excluded), in degrees."""
+    return float(np.degrees(np.max(np.abs(np.asarray(a_rad) - np.asarray(b_rad)))))
+
+
+def _engaged(command_joints: np.ndarray, follower_joints: np.ndarray) -> bool:
+    """Whether a Star leader may take over the follower: every joint within ENGAGE_TOLERANCE_DEG (gripper excluded)."""
+    return _joint_offset_deg(command_joints, follower_joints) <= ENGAGE_TOLERANCE_DEG
+
+
+def _star_read_outcome(failures: int, read_ok: bool, engaged: bool) -> tuple[int, bool]:
+    """The (consecutive failures, engaged) after one Star read.
+
+    An engaged Star leader that failed STAR_MAX_READ_FAILURES reads in a row disengages: when its reads come back it
+    may be anywhere, and following it at once would jump the follower there.
+    """
+    failures = 0 if read_ok else failures + 1
+    return failures, engaged and failures < STAR_MAX_READ_FAILURES
+
+
+def _records_frame(leader_ok: bool, follower_ok: bool, command_ok: bool, engaged: bool) -> bool:
+    """Whether this tick's frame may be recorded: every read succeeded and the follower is following its command.
+
+    A disengaged Star leader (before the gate, or after repeated read failures) is read but not sent to the follower,
+    which holds; recording its pose as the action would label frames with a command the follower never got.
+    """
+    return leader_ok and follower_ok and command_ok and engaged
+
+
+def _not_following_label(side: str, offset_deg: float | None) -> str:
+    """The dashboard's leader line while the follower (`side`) waits for the Star arm to come to its pose."""
+    off = "" if offset_deg is None else f" (off by {offset_deg:.0f}°)"
+    return f"{side} arm: not following yet: move the Star arm to the follower's pose{off}"
+
+
+def _record_maps(
+    leader: str,
+    follower: str,
+    leader_joints: np.ndarray,
+    leader_grip: float,
+    follower_joints: np.ndarray,
+    follower_grip: float,
+    command_joints: np.ndarray,
+    command_grip: float,
+) -> tuple[dict, dict, dict, dict]:
+    """A frame's (state joints, state grips, action joints, action grips), each keyed by side.
+
+    The follower's state is what it measured and its action what it was sent (the command). The --leader Metal arm
+    records itself as both: with a Metal leader the command is that arm's own pose, so this is the leader-mirrors
+    layout; with a Star leader that arm rests, and recording it as it is teaches a model to keep it still.
+    """
+    state_joints = {leader: leader_joints, follower: follower_joints}
+    state_grips = {leader: leader_grip, follower: follower_grip}
+    action_joints = {leader: leader_joints, follower: command_joints}
+    action_grips = {leader: leader_grip, follower: command_grip}
+    return state_joints, state_grips, action_joints, action_grips
+
+
+def _open_star_leader(port: str, calibration_id: str):
+    """Opens the Star leader with its Metal preset; exits when its driver, its servos or its calibration is missing."""
+    if RebotArm102Leader is None:
+        sys.exit("--leader-device star needs the Star driver: uv sync --extra makermods --extra realsense")
+    device = RebotArm102Leader(RebotArm102LeaderMetalTeleopConfig(port=port, id=calibration_id))
+    if not device.calibration_fpath.is_file():
+        found = sorted(p.stem for p in device.calibration_dir.glob("*.json"))
+        sys.exit(
+            f"No Star calibration named {calibration_id!r} in {device.calibration_dir} (found: {found or 'none'}). "
+            "Calibrate the Star arm in makermodslab (Metal arm, 'Star Arm 102 leader'), "
+            "then pass its name as --star-id."
+        )
+    device.connect(calibrate=False)
+    return device
 
 
 def _read_follower_degs(device) -> dict[str, float]:
@@ -376,6 +526,7 @@ _PAGE = """\
   .gravity { color: #8f8; }
   .torque_off { color: #fa0; }
   .gravity_failed { color: #f55; font-weight: bold; }
+  .star { color: #8f8; }
   #controls { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
   button { font-family: monospace; font-size: 0.9rem; padding: 0.45rem 1rem; border: 1px solid #444; background: #1e1e1e; color: #ccc; cursor: pointer; border-radius: 3px; }
   button:hover:not(:disabled) { background: #2a2a2a; border-color: #666; }
@@ -650,11 +801,25 @@ def main() -> None:
         help="Skip the metal gripper holding-torque controller (use if the gripper motor is unresponsive).",
     )
     parser.add_argument("--port", type=int, default=8080, help="Dashboard port (default 8080).")
+    parser.add_argument(
+        "--leader-device",
+        default="metal",
+        choices=["metal", "star"],
+        help="metal (default): the --leader Metal arm is moved by hand. star: a Star Arm 102 leads the follower, and "
+        "the --leader Metal arm rests torque off and is recorded still.",
+    )
+    parser.add_argument("--star-port", help="The Star leader's serial port, e.g. /dev/serial/by-id/usb-1a86_...")
+    parser.add_argument("--star-id", help="The Star leader's calibration name (as makermodslab saved it)")
     args = parser.parse_args()
 
     if args.leader == args.follower:
         print("Error: leader and follower must be different arms.")
         return
+    star = args.leader_device == "star"
+    if star and not (args.star_port and args.star_id):
+        parser.error("--leader-device star needs --star-port and --star-id")
+    if star and args.gravity:
+        parser.error("--gravity is for a Metal leader arm; leave it out with --leader-device star")
 
     from dream_hackathon import cameras as cam_mod
     from dream_hackathon import config as cfg
@@ -701,6 +866,13 @@ def main() -> None:
     except OSError as e:
         print(f"Warning: could not start dashboard on port {args.port} ({e}). Continuing without it.")
 
+    # ---- open the Star leader first: a missing driver or calibration then exits before any arm is open
+    star_dev = None
+    if star:
+        print(f"Opening the Star Arm 102 leader on {args.star_port} (calibration {args.star_id!r}) ...")
+        star_dev = _open_star_leader(args.star_port, args.star_id)
+        print("  Star leader: connected")
+
     # ---- open leader arm (torque off or gravity-compensated)
     leader_cfg = station.arms[args.leader]
     leader_gravity = False
@@ -729,16 +901,17 @@ def main() -> None:
                 print(f"--gravity failed ({e}); falling back to torque-off.")
 
     if not leader_gravity:
-        print(f"Opening {args.leader} arm (torque off — leader) ...")
+        role = "resting, recorded still" if star else "leader"
+        print(f"Opening {args.leader} arm (torque off — {role}) ...")
         leader_dev = Follower(FollowerConfig(
             port=leader_cfg.port, id="mirror_leader", can_interface=mm.can_interface
         ))
         leader_dev.bus.connect(handshake=False)
         leader_dev.bus.disable_torque()
-        print(f"  {args.leader}: connected (torque off — move it by hand)")
+        print(f"  {args.leader}: connected (torque off — {'leave it resting' if star else 'move it by hand'})")
 
-    leader_mode = _leader_mode(args.gravity, leader_gravity)
-    leader_label = _leader_mode_label(leader_mode, args.leader)
+    leader_mode = LEADER_STAR if star else _leader_mode(args.gravity, leader_gravity)
+    leader_label = _leader_mode_label(leader_mode, args.follower if star else args.leader)
     with dash_state.lock:
         dash_state.leader_mode = leader_mode
         dash_state.leader_mode_label = leader_label
@@ -819,6 +992,11 @@ def main() -> None:
     tick = 0
     homing_since: float | None = None
     applied_task_version = 0
+    # A Metal leader is the follower's command from the first tick. A Star leader takes over only once it is brought
+    # to the follower's pose (and again after each homing), so the follower never jumps to where the Star arm is.
+    engaged = not star
+    offset_deg: float | None = None  # the Star arm's distance from the follower's pose while not engaged
+    star_failures = 0  # consecutive failed Star reads
 
     print("\nReady. Controls (type then Enter, or use the dashboard):")
     print("  Enter — start episode / save episode")
@@ -856,6 +1034,41 @@ def main() -> None:
                 follower_joints = np.zeros(6)
                 follower_grip = 0.0
 
+            # The follower's command: the Metal leader's pose, or the Star leader's (in follower degrees, its gripper
+            # in the follower's convention). A failed Star read is never commanded or recorded either.
+            if star:
+                command_ok = True
+                try:
+                    command_joints, command_grip = _degs_to_joints_grip(_read_star_degs(star_dev), follower_cfg)
+                except Exception as e:
+                    print(f"Star leader read error: {e}")
+                    command_ok = False
+                    command_joints = np.zeros(6)
+                    command_grip = 0.0
+                was_engaged = engaged
+                star_failures, engaged = _star_read_outcome(star_failures, command_ok, engaged)
+                if was_engaged and not engaged:
+                    print(
+                        f"Star leader disengaged after {star_failures} failed reads in a row: bring it back to the "
+                        "follower's pose to follow again."
+                    )
+            else:
+                command_ok, command_joints, command_grip = leader_ok, leader_joints, leader_grip
+
+            # A Star leader engages once it is within ENGAGE_TOLERANCE_DEG of the follower (never while homing).
+            if not engaged and not _homing_now:
+                if command_ok and follower_ok:
+                    offset_deg = _joint_offset_deg(command_joints, follower_joints)
+                    if _engaged(command_joints, follower_joints):
+                        engaged, offset_deg = True, None
+                        print(f"Star leader engaged (within {ENGAGE_TOLERANCE_DEG:.0f}°): the follower follows it.")
+                    elif tick % (station.control_hz * 2) == 0:
+                        print(
+                            f"Not following yet: move the Star arm to the follower's pose (off by {offset_deg:.0f}°)"
+                        )
+                else:
+                    offset_deg = None
+
             # Command follower: home sequence takes priority over mirroring
             if _homing_now:
                 if homing_since is None:
@@ -874,6 +1087,8 @@ def main() -> None:
                 elif outcome != "hold":
                     with dash_state.lock:
                         dash_state.homing = False
+                    if star:  # the Star arm stayed where it was: bring it to the follower again before it leads
+                        engaged = False
                     if outcome == "reached":
                         print("↩ Home reached.")
                     else:
@@ -882,19 +1097,26 @@ def main() -> None:
                         )
             else:
                 homing_since = None
-                if leader_ok:
+                if command_ok and engaged:
                     try:
-                        _command_follower(follower_dev, follower_cfg, leader_joints, leader_grip, args.grip_extra)
+                        _command_follower(follower_dev, follower_cfg, command_joints, command_grip, args.grip_extra)
                     except Exception as e:
                         print(f"command error: {e}")
 
             # Record frame
-            if episode is not None and leader_ok and follower_ok and tick % record_every == 0:
+            recordable = _records_frame(leader_ok, follower_ok, command_ok, engaged)
+            if episode is not None and recordable and tick % record_every == 0:
                 images = {video_key_map[role]: cams[role].latest() for role in ("overhead", "wrist_l", "wrist_r")}
-                joints_map = {args.leader: leader_joints, args.follower: leader_joints}
-                grips_map = {args.leader: leader_grip, args.follower: leader_grip}
-                measured_joints = {args.leader: leader_joints, args.follower: follower_joints}
-                measured_grips = {args.leader: leader_grip, args.follower: follower_grip}
+                measured_joints, measured_grips, joints_map, grips_map = _record_maps(
+                    args.leader,
+                    args.follower,
+                    leader_joints,
+                    leader_grip,
+                    follower_joints,
+                    follower_grip,
+                    command_joints,
+                    command_grip,
+                )
                 vec_state = layouts.to_vector(station.arm, measured_joints, measured_grips)
                 vec_action = layouts.to_vector(station.arm, joints_map, grips_map)
                 episode.add_frame(state=vec_state, action=vec_action, images=images)
@@ -918,8 +1140,11 @@ def main() -> None:
                 dash_state.total_episodes = folders.saved_episodes
                 dash_state.folder = "" if folders.folder is None else str(folders.folder)
                 dash_state.folder_error = folders.error or ""
-                dash_state.leader_grip = leader_grip
-                dash_state.shoulder_pan_deg = math.degrees(leader_joints[0])
+                dash_state.leader_grip = command_grip
+                dash_state.shoulder_pan_deg = math.degrees(command_joints[0])
+                dash_state.leader_mode_label = (
+                    leader_label if engaged else _not_following_label(args.follower, offset_deg)
+                )
 
             # Handle keyboard / dashboard commands
             try:
@@ -936,6 +1161,9 @@ def main() -> None:
                         task_text = _task_or_default(dash_state.task)
                     if action == "start" and _is_homing:
                         print("(cannot start while homing — wait for home to complete)")
+                    elif action == "start" and not engaged:
+                        off = "" if offset_deg is None else f", off by {offset_deg:.0f}°"
+                        print(f"(cannot start: not following yet — move the Star arm to the follower's pose{off})")
                     elif action == "start" and pinned is None and not task_set:
                         print("(set a task first: its name becomes the folder the episodes are saved in)")
                     elif action == "start" and not folders.use(task_text):  # the task's folder, whatever the loop did
@@ -977,8 +1205,10 @@ def main() -> None:
             # Print status every ~2s
             if tick % (station.control_hz * 2) == 0:
                 status = "● REC" if episode is not None else ("↩ HOME" if _homing_now else "○ idle")
-                pan = math.degrees(leader_joints[0])
-                print(f"{status}  shoulder_pan={pan:+.1f}°  grip={leader_grip:.2f}  episodes={folders.saved_episodes}")
+                pan = math.degrees(command_joints[0])
+                print(
+                    f"{status}  shoulder_pan={pan:+.1f}°  grip={command_grip:.2f}  episodes={folders.saved_episodes}"
+                )
 
             # Sleep to maintain control rate
             elapsed = time.monotonic() - t0
@@ -1007,6 +1237,11 @@ def main() -> None:
             leader_dev.disconnect()
         else:
             leader_dev.bus.disconnect(False)
+        if star_dev is not None:
+            try:
+                star_dev.disconnect()
+            except Exception as e:
+                print(f"  warning: Star leader disconnect: {e}")
         print("Done.")
 
 

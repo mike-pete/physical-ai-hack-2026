@@ -496,3 +496,185 @@ def test_episodes_are_saved_in_the_folder_of_their_task(mc: ModuleType, tmp_path
     assert (first / "data" / "chunk-000" / "episode_000001.parquet").exists()
     tasks = (first / "meta" / "tasks.jsonl").read_text().splitlines()
     assert {json.loads(line)["task"] for line in tasks} == {"stack the blocks", "Stack the blocks!"}
+
+
+# ------------------------------------------------------------------ the Star Arm 102 leader
+
+
+def test_the_star_mode_has_words_naming_the_follower_it_leads(mc: ModuleType) -> None:
+    assert mc._leader_mode_label(mc.LEADER_STAR, "right") == "right arm: follows the Star Arm 102 leader"
+
+
+def test_the_offset_is_the_largest_joint_difference_in_degrees(mc: ModuleType) -> None:
+    star = np.radians([0.0, 10.0, -20.0, 0.0, 0.0, 0.0])
+    follower = np.radians([5.0, 10.0, 0.0, 0.0, 0.0, 0.0])
+    assert mc._joint_offset_deg(star, follower) == pytest.approx(20.0)
+
+
+def test_a_star_arm_engages_only_within_the_tolerance_on_every_joint(mc: ModuleType) -> None:
+    follower = np.zeros(6)
+    inside = np.zeros(6)
+    inside[2] = np.radians(mc.ENGAGE_TOLERANCE_DEG - 0.5)
+    outside = np.zeros(6)
+    outside[5] = np.radians(mc.ENGAGE_TOLERANCE_DEG + 0.5)  # one joint out is enough to keep the follower holding
+    assert mc._engaged(inside, follower)
+    assert not mc._engaged(outside, follower)
+
+
+def test_a_star_arm_that_failed_too_often_disengages(mc: ModuleType) -> None:
+    failures, engaged = 0, True
+    for _ in range(mc.STAR_MAX_READ_FAILURES - 1):
+        failures, engaged = mc._star_read_outcome(failures, False, engaged)
+        assert engaged  # a few missed reads are ridden out
+    failures, engaged = mc._star_read_outcome(failures, False, engaged)
+    assert not engaged
+    # When its reads come back it is not trusted again until it passes the gate: it may be anywhere.
+    failures, engaged = mc._star_read_outcome(failures, True, engaged)
+    assert failures == 0 and not engaged
+
+
+def test_one_good_read_resets_the_count_of_failures(mc: ModuleType) -> None:
+    failures, engaged = mc._star_read_outcome(mc.STAR_MAX_READ_FAILURES - 1, True, True)
+    assert (failures, engaged) == (0, True)
+
+
+@pytest.mark.parametrize(
+    ("leader_ok", "follower_ok", "command_ok", "engaged", "records"),
+    [
+        (True, True, True, True, True),
+        (False, True, True, True, False),
+        (True, False, True, True, False),
+        (True, True, False, True, False),
+        (True, True, True, False, False),  # the follower is holding: the Star pose was never its command
+    ],
+)
+def test_a_frame_is_recorded_only_when_the_follower_followed_its_command(
+    mc: ModuleType, leader_ok: bool, follower_ok: bool, command_ok: bool, engaged: bool, records: bool
+) -> None:
+    assert mc._records_frame(leader_ok, follower_ok, command_ok, engaged) == records
+
+
+def test_the_resting_arm_is_recorded_still_and_the_follower_gets_the_star_command(mc: ModuleType) -> None:
+    resting, measured, command = np.full(6, 0.1), np.full(6, 0.2), np.full(6, 0.3)
+    state_j, state_g, action_j, action_g = mc._record_maps("left", "right", resting, 0.0, measured, 0.4, command, 0.5)
+    assert np.array_equal(state_j["left"], resting) and np.array_equal(state_j["right"], measured)
+    assert np.array_equal(action_j["left"], resting) and np.array_equal(action_j["right"], command)
+    assert (state_g, action_g) == ({"left": 0.0, "right": 0.4}, {"left": 0.0, "right": 0.5})
+
+
+def test_a_metal_leader_records_as_it_always_did(mc: ModuleType) -> None:
+    """With a Metal leader the command is the leader's own pose, so both arms' actions are the leader's pose."""
+    leader, measured = np.full(6, 0.1), np.full(6, 0.2)
+    _sj, _sg, action_j, action_g = mc._record_maps("left", "right", leader, 0.7, measured, 0.6, leader, 0.7)
+    assert np.array_equal(action_j["left"], leader) and np.array_equal(action_j["right"], leader)
+    assert action_g == {"left": 0.7, "right": 0.7}
+
+
+def test_the_waiting_line_says_how_far_off_the_star_arm_is(mc: ModuleType) -> None:
+    assert mc._not_following_label("right", 31.6) == (
+        "right arm: not following yet: move the Star arm to the follower's pose (off by 32°)"
+    )
+    assert mc._not_following_label("right", None) == (
+        "right arm: not following yet: move the Star arm to the follower's pose"
+    )
+
+
+@dataclasses.dataclass
+class _Monitor:
+    angle_deg: float
+    reliable: bool = True
+
+
+@dataclasses.dataclass
+class _Sample:
+    raw_deg: float
+    filtered_deg: float
+    reliable: bool
+
+
+class _FakeStar:
+    """Just enough of the Star leader's driver for the readings: ids, ranges, directions and a servo bus."""
+
+    def __init__(self, monitors: dict[int, _Monitor], singles: dict[int, "_Sample | Exception"] | None = None) -> None:
+        names = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_yaw", "wrist_roll", "gripper")
+        self.config = type(
+            "Config",
+            (),
+            {
+                "joint_ids": {name: i for i, name in enumerate(names, start=1)},
+                "joint_ranges": dict.fromkeys(names, (-90.0, 90.0)),
+                "joint_directions": dict.fromkeys(names, 1.0),
+            },
+        )()
+        self.bus = type("Bus", (), {})()
+        self.bus.sync_monitor = lambda _ids: monitors
+        singles = singles or {}
+
+        def read_angle(servo_id: int, multi_turn: bool) -> _Sample:
+            assert multi_turn
+            answer = singles[servo_id]
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        self.bus.read_angle = read_angle
+
+    def _round_to_valid_range(self, angle: float, low: float, high: float) -> tuple[float, int]:
+        return angle, 0
+
+
+def test_the_star_degrees_are_clamped_to_the_followers_range(mc: ModuleType) -> None:
+    monitors = {i: _Monitor(10.0 * i) for i in range(1, 8)}
+    monitors[1] = _Monitor(200.0)  # past the range's end
+    degs = mc._read_star_degs(_FakeStar(monitors))
+    assert degs["shoulder_pan"] == 90.0
+    assert degs["shoulder_lift"] == 20.0 and degs["gripper"] == 70.0
+
+
+def test_a_joint_resting_at_zero_is_read_again_on_its_own(mc: ModuleType) -> None:
+    """The servo library calls a reading near 0 unreliable and holds the last one, yet the servo did answer."""
+    monitors = {i: _Monitor(10.0) for i in range(1, 8)}
+    monitors[3] = _Monitor(5.0, reliable=False)
+    star = _FakeStar(monitors, {3: _Sample(raw_deg=0.4, filtered_deg=5.0, reliable=False)})
+    assert mc._read_star_degs(star)["elbow_flex"] == pytest.approx(0.4)
+
+
+def test_a_glitch_is_not_trusted_as_a_reading(mc: ModuleType) -> None:
+    monitors = {i: _Monitor(10.0) for i in range(1, 8)}
+    monitors[3] = _Monitor(80.0, reliable=False)
+    star = _FakeStar(monitors, {3: _Sample(raw_deg=0.0, filtered_deg=80.0, reliable=False)})  # jumped to 0 from far
+    with pytest.raises(RuntimeError, match="elbow_flex.*glitch"):
+        mc._read_star_degs(star)
+
+
+def test_a_servo_that_does_not_answer_fails_the_reading(mc: ModuleType) -> None:
+    monitors = {i: _Monitor(10.0) for i in range(1, 8)}
+    del monitors[2]  # the sync read missed it
+    star = _FakeStar(monitors, {2: TimeoutError("no reply")})
+    with pytest.raises(RuntimeError, match="shoulder_lift.*did not answer"):
+        mc._read_star_degs(star)
+
+
+def test_a_missing_star_driver_exits_naming_the_extras(mc: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mc, "RebotArm102Leader", None)
+    with pytest.raises(SystemExit, match=r"--extra makermods --extra realsense"):
+        mc._open_star_leader("/dev/ttyUSB0", "mine")
+
+
+def test_a_missing_calibration_exits_listing_the_ones_there_are(
+    mc: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    (tmp_path / "station arm.json").write_text("{}")
+
+    class _Driver:
+        calibration_dir = tmp_path
+        calibration_fpath = tmp_path / "other.json"
+
+        def __init__(self, _config: object) -> None:
+            pass
+
+    monkeypatch.setattr(mc, "RebotArm102Leader", _Driver)
+    monkeypatch.setattr(mc, "RebotArm102LeaderMetalTeleopConfig", lambda **_kw: object())
+    with pytest.raises(SystemExit) as excinfo:
+        mc._open_star_leader("/dev/ttyUSB0", "other")
+    assert "'other'" in str(excinfo.value) and "station arm" in str(excinfo.value)
