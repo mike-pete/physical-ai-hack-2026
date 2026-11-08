@@ -43,6 +43,16 @@ You can stop it with Ctrl+C at any point once the upload is done. Pick up again 
 
 A queued job runs to its end and cannot be cancelled. If training fails, the job ends with no model and costs nothing; the error says why.
 
+### Upload without fine-tuning
+
+To put a dataset on your account without queueing a job, run `tools/upload_dataset.py`. It runs the same checks and the same upload as `tools/finetune.py` (the dataset folder is the same one, the `-eef` folder on Metal and Maker arms), waits until the platform has processed the dataset, and stops. Nothing is charged:
+
+```bash
+~/dream-env/bin/python tools/upload_dataset.py ~/hackathon_data/myteam-cubes --arm yam --name myteam-cubes
+```
+
+It prints the dataset's id. Fine-tune on it later with `tools/finetune.py --arm yam --dataset-id ds_... --suffix myteam-cubes` (that queues the paid job). A dataset name must be new on your account, so a later upload of more episodes needs another `--name`.
+
 ## Several sessions, several tasks
 
 Every session you collect into the same folder becomes one dataset, and one fine-tune can learn several tasks. Labels are optional: Dream's service labels every dataset from its overhead camera when it processes it, and a `--task` text you recorded travels with the episodes too. To train on two folders together, put both inside one parent folder and upload the parent: the platform reads each subfolder as one session. On Metal and Maker arms, run `tools/add_eef.py` on each folder first and put the `-eef` folders in the parent.

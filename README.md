@@ -161,7 +161,7 @@ No arms yet? On a YAM config, `uv run dhk-collect --config configs/yam.yaml --si
 | `src/dream_hackathon/station_lock.py` | One program drives the arms at a time (shared with `dreamcli`) |
 | `src/dream_hackathon/embodiments/` | The Dream embodiment configs your fine-tunes are registered with |
 | `configs/` | One template station config per arm type; a station's own is `configs/station.yaml` (not committed) |
-| `tools/` | Dream API steps, run in the Dream library's environment: `add_eef.py`, `finetune.py` |
+| `tools/` | Dream API steps, run in the Dream library's environment: `add_eef.py`, `upload_dataset.py` (upload only), `finetune.py` |
 | `scripts/` | Device checks, the URDF download, and station helpers: `use_dream_tcp.py` (Dream's tool point for Metal and Maker arms), `allow_can_bringup.sh` (the dashboard's CAN buttons), `remove_api_key.sh`, `wipe_station.sh` |
 | `docs/` | Collection, fine-tuning, running and setup guides |
 | `CLAUDE.md`, `.claude/skills/` | Claude Code's rules for this repo and the `station-setup` skill |
