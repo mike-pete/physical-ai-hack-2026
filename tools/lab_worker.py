@@ -46,10 +46,9 @@ RECORD_FPS = 30
 ## Where `shutdown` homes the arms before switching them off, seconds: slow, like the Home button.
 SHUTDOWN_HOME_S = 8.0
 ## The Metal arm's gripper motor id on its CAN bus, and Damiao's clear-error command byte (an `FF*7 xx` frame).
-## The model's answers have been taking 3 to 9 s on a busy server, and Dream's loop discards any answer later than
-## action_timeout_s (3 s) and holds still instead: the arms barely move. A late answer is still used here, up to
-## these limits; the end effector's speed cap still bounds every move.
-ACTION_TIMEOUT_S = 10.0
+## Dream's loop discards an answer later than action_timeout_s (3 s, kept) and asks again from a fresh view, so
+## no move is made from a stale picture. A slow server only makes the arms wait, so more empty ticks are
+## tolerated before a run stops.
 MAX_STALL_TICKS = 400  # empty-buffer ticks (20 Hz) tolerated before a run stops: 20 s
 WARMUP_CHECKPOINT = "dreamlabs/dream-1-beta"  # any checkpoint of the body: the compile does not depend on it
 GRIPPER_CAN_ID = 7
@@ -443,11 +442,7 @@ class DreamBackend:
                 inference_log_path=app.inference_log_path,
                 camera_owner=False,
                 recorder=None,
-                **{
-                    **run.loop_settings(app),
-                    "action_timeout_s": max(ACTION_TIMEOUT_S, app.action_timeout_s),
-                    "max_stall_ticks": max(MAX_STALL_TICKS, app.max_stall_ticks),
-                },
+                **{**run.loop_settings(app), "max_stall_ticks": max(MAX_STALL_TICKS, app.max_stall_ticks)},
             )
             try:
                 async with loop:
