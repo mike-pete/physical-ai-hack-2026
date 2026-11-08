@@ -431,41 +431,101 @@ def test_episodes_are_saved_in_the_folder_of_their_task(mc: ModuleType, tmp_path
 # ------------------------------------------------------------------ homing both arms
 
 
-def test_both_arms_ramp_home_together(mc: ModuleType) -> None:
-    outcome, follower, leader = mc._home_both_step(
-        np.array([1.0, 0, 0, 0, 0, 0]), HOME, np.array([-1.0, 0, 0, 0, 0, 0]), HOME, 0.1, 1.0
-    )
+def _traj(mc: ModuleType, follower, leader, peak: float = 1.0, leader_home=HOME):
+    return mc._HomeTrajectory((follower, leader), (HOME, leader_home), peak)
+
+
+def test_the_trajectory_starts_and_ends_at_rest_and_is_sync_free_of_jumps(mc: ModuleType) -> None:
+    start = np.array([1.0, -0.5, 0.25, 0, 0, 0])
+    traj = _traj(mc, start, start)
+    assert np.allclose(traj.targets(0.0)[0], start)
+    assert np.allclose(traj.targets(traj.duration_s)[0], HOME)
+    assert np.allclose(traj.targets(traj.duration_s * 10)[0], HOME)
+    tiny = 1e-3 * traj.duration_s
+    assert np.max(np.abs(traj.targets(tiny)[0] - start)) < 1e-6  # eases in: barely moved after a thousandth of it
+    assert np.max(np.abs(traj.targets(traj.duration_s - tiny)[0] - HOME)) < 1e-6  # and eases out
+
+
+def test_every_joint_arrives_together_on_a_straight_path(mc: ModuleType) -> None:
+    start = np.array([1.0, -0.5, 0.25, 0, 0, 0])
+    traj = _traj(mc, start, start)
+    for fraction in (0.2, 0.5, 0.8):
+        q = traj.targets(fraction * traj.duration_s)[0]
+        blend = (start[0] - q[0]) / start[0]
+        assert np.allclose(start * (1 - blend), q)  # the same share of the way for every joint
+
+
+def test_the_peak_speed_is_the_cap(mc: ModuleType) -> None:
+    start = np.array([2.0, -1.0, 0, 0, 0, 0])
+    traj = _traj(mc, start, start, peak=0.75)
+    times = np.linspace(0.0, traj.duration_s, 2001)
+    path = np.array([traj.targets(t)[0] for t in times])
+    speed = np.max(np.abs(np.diff(path, axis=0)), axis=1) / np.diff(times)
+    assert speed.max() == pytest.approx(0.75, rel=0.01)
+
+
+def test_both_arms_share_one_duration_set_by_the_farther(mc: ModuleType) -> None:
+    near, far = np.full(6, 0.1), np.full(6, 1.0)
+    traj = _traj(mc, near, far)
+    assert traj.duration_s == pytest.approx(1.875 * 1.0 / 1.0)
+    assert np.allclose(traj.targets(traj.duration_s / 2)[0], near / 2)  # the near arm eases over the same time
+
+
+def test_an_arm_at_home_has_no_duration(mc: ModuleType) -> None:
+    assert _traj(mc, HOME, HOME).duration_s == 0.0
+
+
+def test_both_arms_are_commanded_along_the_trajectory(mc: ModuleType) -> None:
+    start = np.full(6, 1.0)
+    traj = _traj(mc, start, -start)
+    t = traj.duration_s / 2
+    outcome, follower, leader = mc._home_both_step(start / 2, HOME, -start / 2, HOME, traj, t)
     assert outcome == "move"
-    assert np.allclose(follower, [0.9, 0, 0, 0, 0, 0])
-    assert np.allclose(leader, [-0.9, 0, 0, 0, 0, 0])
+    assert np.allclose(follower, start / 2)  # halfway, and the arm is there
+    assert np.allclose(leader, -start / 2)
+
+
+def test_a_command_never_runs_further_ahead_than_its_cap(mc: ModuleType) -> None:
+    start = np.full(6, 1.0)
+    traj = _traj(mc, start, start)
+    stalled = start  # the arm has not moved while the trajectory has run on
+    _, follower, leader = mc._home_both_step(stalled, HOME, stalled, HOME, traj, traj.duration_s)
+    assert np.allclose(follower, stalled - mc.HOME_MAX_LEAD_RAD)
+    assert np.allclose(leader, stalled - mc.LEADER_HOME_MAX_LEAD_RAD)
 
 
 def test_an_arm_that_is_home_is_held_there_while_the_other_arrives(mc: ModuleType) -> None:
-    outcome, follower, leader = mc._home_both_step(HOME, HOME, np.full(6, 1.0), HOME, 0.1, 1.0)
+    far = np.full(6, 1.0)
+    traj = _traj(mc, HOME, far)
+    outcome, follower, leader = mc._home_both_step(HOME, HOME, far, HOME, traj, 0.0)
     assert outcome == "move"
     assert np.array_equal(follower, HOME)
-    assert np.allclose(leader, np.full(6, 0.9))
+    assert np.allclose(leader, far)  # the trajectory has not started: the leader is where it is
 
 
 def test_homing_is_reached_only_when_both_arms_are_home(mc: ModuleType) -> None:
-    assert mc._home_both_step(HOME, HOME, HOME + 0.01, HOME, 0.1, 1.0)[0] == "reached"
-    assert mc._home_both_step(HOME, HOME, np.full(6, 0.5), HOME, 0.1, 1.0)[0] == "move"
+    traj = _traj(mc, np.full(6, 1.0), np.full(6, 1.0))
+    assert mc._home_both_step(HOME, HOME, HOME + 0.025, HOME, traj, 1.0)[0] == "reached"
+    assert mc._home_both_step(HOME, HOME, np.full(6, 0.5), HOME, traj, 1.0)[0] == "move"
 
 
 def test_a_leader_without_a_home_is_left_alone(mc: ModuleType) -> None:
-    outcome, follower, leader = mc._home_both_step(np.full(6, 1.0), HOME, np.full(6, 5.0), None, 0.1, 1.0)
+    far = np.full(6, 1.0)
+    traj = mc._HomeTrajectory((far, np.full(6, 5.0)), (HOME, None), 1.0)
+    outcome, follower, leader = mc._home_both_step(far, HOME, np.full(6, 5.0), None, traj, 0.0)
     assert outcome == "move"
-    assert np.allclose(follower, np.full(6, 0.9))
-    assert leader is None
+    assert follower is not None and leader is None
 
 
 def test_either_arm_running_out_of_time_ends_homing(mc: ModuleType) -> None:
     far = np.full(6, 1.0)
-    assert mc._home_both_step(HOME, HOME, far, HOME, 0.1, mc.HOME_TIMEOUT_S + 1)[0] == "timeout"
+    traj = _traj(mc, HOME, far)
+    assert mc._home_both_step(HOME, HOME, far, HOME, traj, mc.HOME_TIMEOUT_S + 1)[0] == "timeout"
 
 
 def test_homing_holds_while_neither_arm_can_be_read(mc: ModuleType) -> None:
-    assert mc._home_both_step(None, HOME, None, HOME, 0.1, 1.0)[0] == "hold"
+    traj = _traj(mc, np.full(6, 1.0), np.full(6, 1.0))
+    assert mc._home_both_step(None, HOME, None, HOME, traj, 1.0)[0] == "hold"
 
 
 def test_homing_frames_drive_the_joints_and_keep_gravity_and_the_gripper(mc: ModuleType) -> None:
@@ -504,21 +564,7 @@ def test_the_leader_homing_wrapper_rewrites_frames_only_while_a_target_is_set(mc
     assert sent[1]["shoulder_pan"][:3] == (*mc.LEADER_HOME_GAINS["shoulder_pan"], pytest.approx(45.0))
 
 
-def test_the_leader_ramps_from_its_last_target_so_the_error_builds(mc: ModuleType) -> None:
-    """A target that follows a stalled arm never exerts more than one tick's step; this one runs ahead of it."""
-    stuck = np.full(6, 0.5)
-    ahead = stuck + 0.05
-    _, _, leader = mc._home_both_step(HOME, HOME, stuck, HOME, 0.025, 1.0, ahead)
-    assert np.allclose(leader, np.full(6, 0.5) + 0.05 - 0.025)
-    assert np.allclose(mc._home_both_step(HOME, HOME, stuck, HOME, 0.025, 1.0)[2], np.full(6, 0.475))
-
-
-def test_the_leader_target_never_runs_further_ahead_than_the_cap(mc: ModuleType) -> None:
-    stuck = np.full(6, 0.5)
-    _, _, leader = mc._home_both_step(HOME, HOME, stuck, HOME, 0.025, 1.0, np.full(6, 0.0))
-    assert np.allclose(leader, stuck - mc.LEADER_HOME_MAX_LEAD_RAD)
-
-
 def test_the_leader_counts_as_home_within_its_looser_bound(mc: ModuleType) -> None:
-    assert mc._home_both_step(HOME, HOME, HOME + 0.025, HOME, 0.1, 1.0)[0] == "reached"
-    assert mc._home_both_step(HOME + 0.04, HOME, HOME, HOME, 0.1, 1.0)[0] == "move"
+    traj = _traj(mc, np.full(6, 1.0), np.full(6, 1.0))
+    assert mc._home_both_step(HOME, HOME, HOME + 0.025, HOME, traj, 1.0)[0] == "reached"
+    assert mc._home_both_step(HOME + 0.04, HOME, HOME, HOME, traj, 1.0)[0] == "move"

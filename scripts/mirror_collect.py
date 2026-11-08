@@ -41,7 +41,7 @@ import sys
 import threading
 import time
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
 import cv2
@@ -65,6 +65,9 @@ LEADER_HOME_GAINS = {
     "wrist_yaw": (20.0, 0.6),
     "wrist_roll": (20.0, 0.6),
 }
+## The follower's home command stays within this of where the follower is (radians), so an arm held back is never
+## pulled hard.
+HOME_MAX_LEAD_RAD = 0.1
 ## The leader counts as home within this bound (radians): friction and the gravity model's error leave a position-
 ## controlled arm a little short of its target.
 LEADER_HOME_TOLERANCE_RAD = 0.03
@@ -164,46 +167,86 @@ def _home_step(
     return "move", measured + np.clip(home - measured, -max_step, max_step)
 
 
+def _smoothstep(tau: float) -> float:
+    """The minimum-jerk blend from 0 to 1 over tau in [0, 1]: it starts and ends at rest."""
+    tau = min(1.0, max(0.0, tau))
+    return tau**3 * (10.0 - 15.0 * tau + 6.0 * tau**2)
+
+
+class _HomeTrajectory:
+    """The path both arms take home: every joint of both arms eases from where it is to its home, all together.
+
+    One duration is shared, so the joints (and the two arms) arrive at the same moment and each arm travels a straight
+    line in joint space. The minimum-jerk blend peaks at 1.875 x the mean speed, so the duration is chosen for the
+    farthest joint to peak at `peak_speed`.
+    """
+
+    def __init__(
+        self, starts: Sequence[np.ndarray | None], homes: Sequence[np.ndarray | None], peak_speed: float
+    ) -> None:
+        """
+        @param starts Per arm, its joints in radians when homing starts (ignored where the arm has no home).
+        @param homes Per arm, its home, or None for an arm that is not driven.
+        @param peak_speed The fastest any joint may move, in rad/s.
+        """
+        self._pairs = [
+            None if home is None or start is None else (np.asarray(start, float), np.asarray(home, float))
+            for start, home in zip(starts, homes, strict=True)
+        ]
+        distance = max((float(np.max(np.abs(h - q))) for q, h in filter(None, self._pairs)), default=0.0)
+        self.duration_s = 1.875 * distance / peak_speed
+
+    def targets(self, elapsed_s: float) -> list[np.ndarray | None]:
+        """Where each arm should be now, in radians; None for an arm that is not driven."""
+        tau = elapsed_s / self.duration_s if self.duration_s > 0.0 else 1.0
+        blend = _smoothstep(tau)
+        return [None if pair is None else pair[0] + blend * (pair[1] - pair[0]) for pair in self._pairs]
+
+
 def _home_both_step(
     follower: np.ndarray | None,
     follower_home: np.ndarray,
     leader: np.ndarray | None,
     leader_home: np.ndarray | None,
-    max_step: float,
+    trajectory: _HomeTrajectory,
     elapsed_s: float,
-    leader_target: np.ndarray | None = None,
 ) -> tuple[Literal["reached", "timeout", "hold", "move"], np.ndarray | None, np.ndarray | None]:
-    """One tick of homing both arms, each ramped at the same capped speed.
+    """One tick of homing both arms along their trajectory.
 
     @param follower The follower's joints in radians, or None when they could not be read this tick.
     @param follower_home The follower's home.
     @param leader The leader's joints in radians, or None when they could not be read this tick.
     @param leader_home The leader's home, or None when the leader cannot be driven (only the follower homes).
-    @param max_step The most any joint may move this tick, in radians.
+    @param trajectory The path both arms follow (follower first, leader second).
     @param elapsed_s How long homing has been running.
-    @param leader_target The leader target commanded last tick, or None on the first tick. The leader ramps from it,
-        not from where the arm is, so a joint held back by friction builds the error that moves it (see
-        LEADER_HOME_MAX_LEAD_RAD).
     @return (outcome, follower command, leader command). "reached" once both arms are home; "timeout" once either has
-        run out of time; "hold" while neither arm can be read; otherwise "move". An arm that is home keeps being
-        commanded to its home while the other arrives; a command is None for an arm whose joints are unknown.
+        run out of time; "hold" while neither arm can be read; otherwise "move". Each command is the trajectory's
+        target kept within a cap of the arm's measured pose (HOME_MAX_LEAD_RAD, LEADER_HOME_MAX_LEAD_RAD), so an arm
+        that cannot keep up is never pulled hard; one that is home keeps being commanded to it while the other
+        arrives; a command is None for an arm whose joints are unknown.
     """
+    targets = trajectory.targets(elapsed_s)
     outcomes = []
     commands = []
-    for measured, home, tolerance in (
-        (follower, follower_home, HOME_TOLERANCE_RAD),
-        (leader, leader_home, LEADER_HOME_TOLERANCE_RAD),
+    for measured, home, target, tolerance, lead in (
+        (follower, follower_home, targets[0], HOME_TOLERANCE_RAD, HOME_MAX_LEAD_RAD),
+        (leader, leader_home, targets[1], LEADER_HOME_TOLERANCE_RAD, LEADER_HOME_MAX_LEAD_RAD),
     ):
         if home is None:
             outcomes.append("reached")
             commands.append(None)
-            continue
-        outcome, command = _home_step(measured, home, max_step, elapsed_s, tolerance)
-        if outcome == "move" and measured is leader and leader_target is not None:
-            ahead = leader_target + np.clip(home - leader_target, -max_step, max_step)
-            command = measured + np.clip(ahead - measured, -LEADER_HOME_MAX_LEAD_RAD, LEADER_HOME_MAX_LEAD_RAD)
-        outcomes.append(outcome)
-        commands.append(home if outcome == "reached" else command)
+        elif measured is not None and float(np.max(np.abs(home - measured))) < tolerance:
+            outcomes.append("reached")
+            commands.append(home)
+        elif elapsed_s > HOME_TIMEOUT_S:
+            outcomes.append("timeout")
+            commands.append(None)
+        elif measured is None:
+            outcomes.append("hold")
+            commands.append(None)
+        else:
+            outcomes.append("move")
+            commands.append(measured + np.clip(target - measured, -lead, lead))
     if "timeout" in outcomes:
         return "timeout", None, None
     if outcomes == ["reached", "reached"]:
@@ -842,7 +885,7 @@ def main() -> None:
         try:
             dream_home = cfg.dream_home(station)
             follower_home, leader_home = dream_home[args.follower], dream_home[args.leader]
-            print(f"Home: Dream's home for both arms, at {home_speed:.2f} rad/s.")
+            print(f"Home: Dream's home for both arms, easing in and out at up to {home_speed:.2f} rad/s.")
         except cfg.ConfigError as e:
             print(f"Home: {e}; Home moves the follower to its start pose, and the left arm stays where it is.")
 
@@ -899,7 +942,7 @@ def main() -> None:
     episode = None
     tick = 0
     homing_since: float | None = None
-    leader_target: np.ndarray | None = None
+    trajectory: _HomeTrajectory | None = None
     applied_task_version = 0
 
     print("\nReady. Controls (type then Enter, or use the dashboard):")
@@ -942,17 +985,24 @@ def main() -> None:
             if _homing_now:
                 if homing_since is None:
                     homing_since = time.monotonic()
-                outcome, command, leader_command = _home_both_step(
-                    follower_joints if follower_ok else None,
-                    follower_home,
-                    leader_joints if leader_ok else None,
-                    leader_home,
-                    home_speed * dt,
-                    time.monotonic() - homing_since,
-                    leader_target,
-                )
+                homing_s = time.monotonic() - homing_since
+                if trajectory is None and follower_ok and (leader_ok or leader_home is None):
+                    # Plan the whole path from where the arms are now, once, so it eases in and out.
+                    trajectory = _HomeTrajectory(
+                        (follower_joints, leader_joints), (follower_home, leader_home), home_speed
+                    )
+                if trajectory is None:
+                    outcome, command, leader_command = ("timeout" if homing_s > HOME_TIMEOUT_S else "hold"), None, None
+                else:
+                    outcome, command, leader_command = _home_both_step(
+                        follower_joints if follower_ok else None,
+                        follower_home,
+                        leader_joints if leader_ok else None,
+                        leader_home,
+                        trajectory,
+                        homing_s,
+                    )
                 if outcome == "move":
-                    leader_target = leader_command
                     try:
                         if command is not None:
                             _command_follower(follower_dev, follower_cfg, command, home_grip, args.grip_extra)
@@ -961,7 +1011,7 @@ def main() -> None:
                     except Exception as e:
                         print(f"home step error: {e}")
                 elif outcome != "hold":
-                    leader_target = None
+                    trajectory = None
                     if leader_homing is not None:
                         leader_homing.set_target(None)
                     with dash_state.lock:
@@ -982,7 +1032,7 @@ def main() -> None:
                                 print(f"    {name} arm: {MOTORS[worst]} was {off:+.1f}° from home")
             else:
                 homing_since = None
-                leader_target = None
+                trajectory = None
                 if leader_ok:
                     try:
                         _command_follower(follower_dev, follower_cfg, leader_joints, leader_grip, args.grip_extra)

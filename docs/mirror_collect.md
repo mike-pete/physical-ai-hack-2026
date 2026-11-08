@@ -56,7 +56,7 @@ To record an episode:
 
 1. Move the left arm; the right arm copies it. Close the left gripper to close the right one.
 2. Press **Start Episode**, do the task with the left arm, then press **Save Episode**. **Discard** throws the episode away.
-3. **Go to Home** moves **both arms** to Dream-1's home pose (the one `dreamcli setup` saved in `~/.dreamlabs/station.yaml`), the left arm under its own motor power (it leaves weightless mode while it goes, and returns to it when it arrives), at half the station's top joint speed. Keep clear of both arms and a hand near the emergency stop. If Dream's home cannot be read, or the left arm is not in gravity compensation, it moves only the right arm, to the pose it had when the script started (the console says which). It is refused while an episode is recording.
+3. **Go to Home** moves **both arms** to Dream-1's home pose (the one `dreamcli setup` saved in `~/.dreamlabs/station.yaml`), the left arm under its own motor power (it leaves weightless mode while it goes, and returns to it when it arrives), along a smooth path: every joint of both arms eases in and out together and arrives at the same moment, with the fastest joint peaking at half the station's top joint speed. Keep clear of both arms and a hand near the emergency stop. If Dream's home cannot be read, or the left arm is not in gravity compensation, it moves only the right arm, to the pose it had when the script started (the console says which). It is refused while an episode is recording.
 
 You can also type in the tmux screen instead of clicking: Enter starts or saves an episode, `d` discards it, `h` goes home, and `q` quits.
 
