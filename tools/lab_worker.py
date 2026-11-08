@@ -205,6 +205,13 @@ class DreamBackend:
         with self._arm_lock:
             self._close_monitor()  # the Motors tab's own adapter must not hold the port the arms need
             configs = self._arm_configs()
+            if self.arms and not any(arm.is_alive() for arm in self.arms.values()):
+                # Nothing in hand is driving an arm any more, so there is nothing to park: let the stale ones go.
+                # If an arm is in fact still powered, Dream's own open check below refuses it.
+                for arm in self.arms.values():
+                    with contextlib.suppress(Exception):
+                        arm.close()
+                self.arms = {}
             if self.arms:
                 if set(self.arms) == set(configs) and self.arms_ok():
                     return
