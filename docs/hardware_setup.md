@@ -106,6 +106,37 @@ uv run python scripts/check_arms.py --config configs/station.yaml
 
 This only reads the arms. YAM arms float in gravity compensation; MakerMods arms are opened with torque off, so support them. Move each arm by hand and check that the numbers for the right side change.
 
+### Find a motor that does not answer (Metal and Maker arms)
+
+```bash
+uv run python scripts/check_joints.py --config configs/station.yaml
+```
+
+This also only reads. It opens each arm on its own with torque off, so support them, and prints a line each time you move a joint by more than a degree: the arm, the joint's name and its angle. A motor that does not answer prints an `ERROR` line with its arm and joint (the gripper included), which tells you which arm has the bad motor. Stop it with Ctrl+C. It does not take the station lock, so stop `dhk-collect` and `dreamcli` first. On a YAM station it only says that it is for Metal and Maker arms.
+
+### Check that the motors drive the arms (powered)
+
+Reading the arms does not show that their motors can move them. `scripts/nudge_joint.py` powers the arms, eases one joint of one arm a few degrees and back, and reports how far the joint really went. Look at what it will do first, with nothing powered (the arms are opened as in the checks above, so support Metal and Maker arms):
+
+```bash
+uv run python scripts/nudge_joint.py --config configs/station.yaml --side left --joint 6 --dry-run
+```
+
+Then move the arm:
+
+```bash
+uv run python scripts/nudge_joint.py --config configs/station.yaml --side left --joint 6
+```
+
+**This moves the arm: run it yourself, in a terminal, with a hand on the emergency stop and both arms resting where they can go limp (they are released when it ends).** It asks for Enter before it powers the arms and before every move, and refuses to run without a terminal.
+
+- `--side left`, `right` or `both` picks the arm by its name in the config, the one the matching Quest controller drives. If it is not the arm you expected, check which CAN adapter `arms.left` and `arms.right` name before you change anything.
+- `--joint` takes the numbers 1 to 6, base to wrist, and may list several (`--joint 6 5 4`). The wrist roll, 6, is the gentlest to start with.
+- `--degrees` sets the size: 3 by default, at most 10. The script cannot know which way a positive angle turns the joint, so start small and use a negative number to go the other way.
+- `--seconds` sets the time each way (4 by default). It cannot be shorter than the size needs, so a joint never goes faster than 5 degrees a second.
+
+It reports each joint as `FOLLOWED` or `DID NOT FOLLOW` (less than half the nudge, which can also mean the joint is at a limit: try the other sign) and exits with 1 if any did not. It stops and eases everything back to where it started if a joint strays more than 4 degrees from where it was told to be, or on Ctrl+C.
+
 ## 3. The cameras
 
 ```bash
