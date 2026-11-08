@@ -46,6 +46,7 @@ RECORD_FPS = 30
 ## Where `shutdown` homes the arms before switching them off, seconds: slow, like the Home button.
 SHUTDOWN_HOME_S = 8.0
 ## The Metal arm's gripper motor id on its CAN bus, and Damiao's clear-error command byte (an `FF*7 xx` frame).
+WARMUP_CHECKPOINT = "dreamlabs/dream-1-beta"  # any checkpoint of the body: the compile does not depend on it
 GRIPPER_CAN_ID = 7
 ## The motors tab: how often the angles are read while a page watches, and how long a `watch` keeps that going.
 ANGLES_HZ = 4
@@ -129,6 +130,27 @@ class DreamBackend:
         for reader in self.readers:
             reader.start()
         self.camera_names = [reader.name for reader in self.readers]
+        self._warm_up_ik()
+
+    def _warm_up_ik(self) -> None:
+        """Compiles Dream's IK now, while no arm is open.
+
+        The compile is seconds of CPU that starve every other thread, and an open Metal gripper latches a fault after
+        500 ms without a command. A run opens its own client, but JAX keeps what this one compiled in the process, so
+        the run's compile is quick and the arms are never among the starved.
+        """
+        client = None
+        try:
+            app = self._run.with_task(self.app, "warm up")
+            client = self._run.open_client(self._run.policy_config(app, WARMUP_CHECKPOINT))
+            if not client.wait_for_ik(self._run.TRAJ_WARMUP_S):
+                logging.warning("the IK did not compile in time; a run will compile it with the arms open")
+        except Exception:
+            logging.exception("could not warm up the IK; a run will compile it with the arms open")
+        finally:
+            if client is not None:
+                with contextlib.suppress(Exception):
+                    client.close()
 
     def frames(self) -> dict[str, np.ndarray]:
         out = {}
