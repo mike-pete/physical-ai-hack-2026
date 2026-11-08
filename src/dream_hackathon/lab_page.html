@@ -76,6 +76,7 @@
       <button class="tab" id="tab-motors" data-tab="motors">Motors</button>
       <button class="tab" id="tab-can" data-tab="can">CAN</button>
     </nav>
+    <button id="voice" title="Talk to the arms' voice agent (needs the microphone)">Voice</button>
     <button id="home-link" title="Back to the prompts page">Home</button>
   </header>
 
@@ -152,6 +153,7 @@
   </section>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.22.4/dist/livekit-client.umd.js"></script>
 <script>
 const HEADERS = { 'Content-Type': 'application/json', 'X-Lab-Dashboard': '1' };
 const $ = (id) => document.getElementById(id);
@@ -472,6 +474,28 @@ $('add-seq').onclick = async () => {
   if (!promptList.length) return alertShow('Add a prompt first: a step runs a saved prompt.');
   const r = await post('/api/sequences', { name: 'New sequence', steps: [{ prompt_id: promptList[0].id, seconds: 60 }] });
   if (r.ok) loadSequences();
+};
+
+// ---- voice (LiveKit): the mic goes to a room the station's voice agent joins
+let voiceRoom = null;
+$('voice').onclick = async () => {
+  if (voiceRoom) { voiceRoom.disconnect(); return; }
+  if (!window.LivekitClient) return alertShow('Voice needs the LiveKit script from the internet: this computer could not load it.');
+  const r = await post('/api/voice/token');
+  if (!r.ok) return;
+  try {
+    const room = new LivekitClient.Room();
+    room.on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {   // the agent's speech
+      if (track.kind === 'audio') { const el = track.attach(); el.dataset.voice = '1'; document.body.append(el); }
+    });
+    room.on(LivekitClient.RoomEvent.Disconnected, () => {
+      document.querySelectorAll('audio[data-voice]').forEach((a) => a.remove());
+      voiceRoom = null; $('voice').textContent = 'Voice'; say('Voice off.', false);
+    });
+    await room.connect(r.url, r.token);
+    await room.localParticipant.setMicrophoneEnabled(true);
+    voiceRoom = room; $('voice').textContent = 'Voice on (click to end)'; say('Voice on: say "stop" or "stop and go home".', false);
+  } catch (e) { alertShow('Voice could not start: ' + e.message); }
 };
 
 // ---- runs

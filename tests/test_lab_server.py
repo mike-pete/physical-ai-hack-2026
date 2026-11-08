@@ -349,3 +349,28 @@ def test_sequences_can_be_listed_edited_and_deleted(rig):
     assert the_lab.store.sequence(1)["name"] == "two"
     assert post(port, "/api/sequences/1/delete")[0] == 200
     assert post(port, "/api/sequences/1/delete")[0] == 400
+
+
+def test_voice_token_is_a_signed_jwt_for_one_room(rig, monkeypatch):
+    import base64
+    import hashlib
+    import hmac
+
+    _, port = rig
+    for name in ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    status, body = post(port, "/api/voice/token")
+    assert status == 400 and "LIVEKIT_API_KEY" in body["error"]
+    monkeypatch.setenv("LIVEKIT_URL", "wss://x.livekit.cloud")
+    monkeypatch.setenv("LIVEKIT_API_KEY", "key")
+    monkeypatch.setenv("LIVEKIT_API_SECRET", "secret")
+    status, body = post(port, "/api/voice/token")
+    assert status == 200 and body["url"] == "wss://x.livekit.cloud"
+    head, claims, signature = body["token"].split(".")
+    pad = lambda part: part + "=" * (-len(part) % 4)  # noqa: E731
+    expected = hmac.new(b"secret", f"{head}.{claims}".encode(), hashlib.sha256).digest()
+    assert base64.urlsafe_b64decode(pad(signature)) == expected
+    data = json.loads(base64.urlsafe_b64decode(pad(claims)))
+    assert data["iss"] == "key" and data["video"]["room"] == body["room"] and data["roomConfig"]["agents"]
+    assert "secret" not in json.dumps(body)
+    assert post(port, "/api/voice/token", headers={"Host": "evil.example"})[0] == 403

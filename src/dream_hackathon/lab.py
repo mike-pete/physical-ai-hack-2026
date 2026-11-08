@@ -32,7 +32,7 @@ import time
 from collections.abc import Callable
 from typing import Any, Protocol
 
-from dream_hackathon import lab_db, station_lock
+from dream_hackathon import lab_db, lab_voice, station_lock
 
 PORT = 9100
 ROOT_ENV = "DHK_LAB_DIR"
@@ -566,6 +566,11 @@ def make_handler(lab: Lab) -> type[http.server.BaseHTTPRequestHandler]:
                 return
             path = self.path.split("?", 1)[0]
             try:
+                if path == "/api/voice/token":
+                    try:
+                        return self._json({"ok": True, "message": "voice ready", **lab_voice.voice_session()})
+                    except ValueError as error:
+                        raise lab_db.LabError(str(error)) from None
                 self._json({"ok": True, "message": self._act(path, body)})
             except LabBusy as error:
                 self._fail(409, str(error))
@@ -668,6 +673,7 @@ def main() -> None:
             lock = station_lock.acquire("dhk-lab")
         except station_lock.StationBusyError as error:
             raise SystemExit(str(error)) from None
+    lab_voice.load_env()
     store = lab_db.Store(root)
     closed = store.close_unfinished()
     if closed:
