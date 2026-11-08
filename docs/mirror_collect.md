@@ -50,10 +50,11 @@ It works on **Metal and Maker arm stations only** (not the YAM). The station has
 | **Start Episode** / **Save Episode**, **Discard**, **Go to Home** | The buttons |
 | The task, and **Set Task** | The text box |
 
-**Check the left arm's colour before you record.** Red means `--gravity` was asked for but did not start, so the arm is running with its motors off. The console says why; call the staff if it keeps happening. Green means the motors hold the arm up, so you move it with much less effort.
+**Check the left arm's colour before you record.** Red means `--gravity` was asked for but did not start, so the arm is running with its motors off. The console says why; call the staff if it keeps happening. Green means the motors hold the arm up, so you move it with much less effort. Leave `--gravity-kd` unset: the arm keeps MakerMods' own damping, and `--gravity-kd 0` lets any error in the gravity model swing the arm on its own.
 
 To record an episode:
 
+1. Wait for the status to leave **⇄ SYNCING TO LEADER**: at the start, and after Go to Home, the right arm first moves slowly to where the left arm is, so it never jumps. Start Episode stays off until it gets there.
 1. Move the left arm; the right arm copies it. Close the left gripper to close the right one.
 2. Press **Start Episode**, do the task with the left arm, then press **Save Episode**. **Discard** throws the episode away.
 3. **Go to Home** brings the right arm back to the pose it had when the script started, at a slow, steady speed. It is refused while an episode is recording.

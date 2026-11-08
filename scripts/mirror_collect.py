@@ -61,6 +61,12 @@ HOME_SPEED = 0.5
 HOME_TOLERANCE_RAD = 1e-3
 ## Homing gives up after this long and mirroring resumes, so a joint that cannot reach home cannot lock the session.
 HOME_TIMEOUT_S = 30.0
+## Before mirroring live, the follower eases to the leader at this joint speed (rad/s) and gripper speed (per second),
+## so it never jumps to wherever the leader happens to be. Live mirroring starts once it is this close.
+SYNC_SPEED = 0.5
+SYNC_GRIP_SPEED = 0.5
+SYNC_TOLERANCE_RAD = math.radians(3.0)
+SYNC_GRIP_TOLERANCE = 0.05
 ## The task an episode records when none is given, and the longest task text Dream accepts (as in collect.py).
 DEFAULT_TASK = "mirror teleoperation"
 TASK_MAX_CHARS = 512
@@ -336,6 +342,7 @@ class _DashState:
     lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
     recording: bool = False
     homing: bool = False
+    syncing: bool = True
     frames: int = 0
     total_episodes: int = 0
     task: str = ""
@@ -465,6 +472,7 @@ function pollStatus() {
     const mode = document.getElementById('mode');
     if (s.homing)         { mode.className = 'homing'; mode.innerHTML = '&#8629; HOMING'; }
     else if (s.recording) { mode.className = 'rec';    mode.innerHTML = '&#9679; REC'; }
+    else if (s.syncing)   { mode.className = 'homing'; mode.innerHTML = '&#8644; SYNCING TO LEADER'; }
     else                  { mode.className = 'idle';   mode.innerHTML = '&#9675; idle'; }
 
     const leader = document.getElementById('leader');
@@ -479,7 +487,7 @@ function pollStatus() {
     const busy = s.recording || s.homing;
     // Without a folder (no task set yet, or its folder could not be opened) an episode has nowhere to go.
     const noFolder = (s.per_task && !s.folder) || !!s.folder_error;
-    document.getElementById('btn-primary').disabled  = s.homing || (!s.recording && noFolder);
+    document.getElementById('btn-primary').disabled  = s.homing || (!s.recording && (noFolder || s.syncing));
     document.getElementById('btn-primary').textContent = s.recording ? 'Save Episode' : 'Start Episode';
     document.getElementById('btn-discard').disabled  = !s.recording;
     document.getElementById('btn-home').disabled     = busy;
@@ -523,6 +531,7 @@ def _make_handler(dash_state: _DashState, cmd_q: "queue.Queue[str]", cams: dict)
                     snap = {
                         "recording": dash_state.recording,
                         "homing": dash_state.homing,
+                        "syncing": dash_state.syncing,
                         "frames": dash_state.frames,
                         "total_episodes": dash_state.total_episodes,
                         "task": dash_state.task,
@@ -638,8 +647,9 @@ def main() -> None:
         help="Gravity compensation / weightless mode on the leader arm (Metal arms only; requires pinocchio).",
     )
     parser.add_argument(
-        "--gravity-kd", type=float, default=0.0, metavar="KD",
-        help="Velocity damping on the leader arm in gravity mode (default 0 = no resistance when moving).",
+        "--gravity-kd", type=float, default=None, metavar="KD",
+        help="Velocity damping on the leader arm in gravity mode (default: MakerMods' own). 0 removes it, but then "
+        "any error in the gravity model lets the arm drift on its own.",
     )
     parser.add_argument(
         "--grip-extra", type=float, default=0.15, metavar="EXTRA",
@@ -712,12 +722,13 @@ def main() -> None:
                 from lerobot.teleoperators.metal_leader import MetalLeader, MetalLeaderConfig
                 print(f"Opening {args.leader} arm (gravity compensation — weightless mode) ...")
                 kd_kwargs: dict = {}
-                try:
-                    # Reduce velocity damping so the arm moves freely; not all versions expose kd.
-                    MetalLeaderConfig(port=leader_cfg.port, id="_probe", can_interface=mm.can_interface, kd=0.0)
-                    kd_kwargs = {"kd": args.gravity_kd}
-                except TypeError:
-                    pass
+                if args.gravity_kd is not None:
+                    try:
+                        # Not all versions expose kd; without it MakerMods' own damping stays.
+                        MetalLeaderConfig(port=leader_cfg.port, id="_probe", can_interface=mm.can_interface, kd=0.0)
+                        kd_kwargs = {"kd": args.gravity_kd}
+                    except TypeError:
+                        print("  this MetalLeader has no kd setting; --gravity-kd is ignored.")
                 leader_dev = MetalLeader(MetalLeaderConfig(
                     port=leader_cfg.port, id="mirror_leader", can_interface=mm.can_interface,
                     hold_kp_on_disconnect=0.0, **kd_kwargs,
@@ -819,6 +830,11 @@ def main() -> None:
     tick = 0
     homing_since: float | None = None
     applied_task_version = 0
+    # The follower eases to the leader before mirroring live (at start and after homing): `sync_joints`/`sync_grip`
+    # are what it was last commanded while easing, None until it is first measured.
+    syncing = True
+    sync_joints: np.ndarray | None = None
+    sync_grip: float | None = None
 
     print("\nReady. Controls (type then Enter, or use the dashboard):")
     print("  Enter — start episode / save episode")
@@ -874,6 +890,8 @@ def main() -> None:
                 elif outcome != "hold":
                     with dash_state.lock:
                         dash_state.homing = False
+                    # The leader is wherever it was left: ease back to it rather than jump.
+                    syncing, sync_joints, sync_grip = True, None, None
                     if outcome == "reached":
                         print("↩ Home reached.")
                     else:
@@ -882,7 +900,25 @@ def main() -> None:
                         )
             else:
                 homing_since = None
-                if leader_ok:
+                if leader_ok and syncing:
+                    if sync_joints is None and follower_ok:
+                        sync_joints, sync_grip = follower_joints.copy(), follower_grip
+                    if sync_joints is not None and sync_grip is not None:
+                        sync_joints = sync_joints + np.clip(
+                            leader_joints - sync_joints, -SYNC_SPEED * dt, SYNC_SPEED * dt
+                        )
+                        sync_grip += float(np.clip(leader_grip - sync_grip, -SYNC_GRIP_SPEED * dt, SYNC_GRIP_SPEED * dt))
+                        try:
+                            _command_follower(follower_dev, follower_cfg, sync_joints, sync_grip, args.grip_extra)
+                        except Exception as e:
+                            print(f"sync step error: {e}")
+                        if (
+                            float(np.max(np.abs(leader_joints - sync_joints))) <= SYNC_TOLERANCE_RAD
+                            and abs(leader_grip - sync_grip) <= SYNC_GRIP_TOLERANCE
+                        ):
+                            syncing = False
+                            print("⇄ Follower reached the leader: mirroring live.")
+                elif leader_ok:
                     try:
                         _command_follower(follower_dev, follower_cfg, leader_joints, leader_grip, args.grip_extra)
                     except Exception as e:
@@ -914,6 +950,7 @@ def main() -> None:
             # Update dashboard state
             with dash_state.lock:
                 dash_state.recording = episode is not None
+                dash_state.syncing = syncing
                 dash_state.frames = episode.frames if episode is not None else 0
                 dash_state.total_episodes = folders.saved_episodes
                 dash_state.folder = "" if folders.folder is None else str(folders.folder)
@@ -936,6 +973,8 @@ def main() -> None:
                         task_text = _task_or_default(dash_state.task)
                     if action == "start" and _is_homing:
                         print("(cannot start while homing — wait for home to complete)")
+                    elif action == "start" and syncing:
+                        print("(cannot start while the follower eases to the leader — wait for 'mirroring live')")
                     elif action == "start" and pinned is None and not task_set:
                         print("(set a task first: its name becomes the folder the episodes are saved in)")
                     elif action == "start" and not folders.use(task_text):  # the task's folder, whatever the loop did
@@ -976,7 +1015,12 @@ def main() -> None:
 
             # Print status every ~2s
             if tick % (station.control_hz * 2) == 0:
-                status = "● REC" if episode is not None else ("↩ HOME" if _homing_now else "○ idle")
+                status = (
+                    "● REC" if episode is not None
+                    else "↩ HOME" if _homing_now
+                    else "⇄ SYNC" if syncing
+                    else "○ idle"
+                )
                 pan = math.degrees(leader_joints[0])
                 print(f"{status}  shoulder_pan={pan:+.1f}°  grip={leader_grip:.2f}  episodes={folders.saved_episodes}")
 
