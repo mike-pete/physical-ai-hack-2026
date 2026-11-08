@@ -15,7 +15,7 @@ from collections.abc import Iterator
 from typing import Any
 
 DEFAULT_CHECKPOINT = "dreamlabs/dream-1-beta"
-DEFAULT_MAX_SECONDS = 180
+DEFAULT_MAX_SECONDS = 300
 ## The longest a prompt may be: Dream's prompts are a few sentences, so this is a guard, not a limit anyone meets.
 PROMPT_MAX_CHARS = 4000
 CHECKPOINT_MAX_CHARS = 200

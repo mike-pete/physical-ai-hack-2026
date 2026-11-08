@@ -369,7 +369,7 @@ function card(p) {
   const el = document.createElement('div'); el.className = 'panel prompt'; el.style.margin = 0;
   const text = document.createElement('textarea'); text.value = drafts[p.id]?.text ?? p.text;
   const cp = document.createElement('input'); cp.type = 'text'; cp.value = drafts[p.id]?.cp ?? p.checkpoint;
-  const secs = document.createElement('input'); secs.type = 'number'; secs.value = drafts[p.id]?.secs ?? 180; secs.min = 5; secs.max = 3600;
+  const secs = document.createElement('input'); secs.type = 'number'; secs.value = drafts[p.id]?.secs ?? 300; secs.min = 5; secs.max = 3600;
   const dry = document.createElement('input'); dry.type = 'checkbox'; dry.checked = drafts[p.id]?.dry ?? false;
   const keep = () => (drafts[p.id] = { text: text.value, cp: cp.value, secs: secs.value, dry: dry.checked });
   [text, cp, secs, dry].forEach((i) => i.addEventListener('input', keep));
