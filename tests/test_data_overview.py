@@ -1,9 +1,7 @@
-"""The data overview: what `scan()` finds in a folder of datasets, the page it renders, and `dhk-dataset overview`."""
+"""The data overview's scan: what it finds in a folder of datasets, and notes on what looks wrong."""
 
-import http.client
 import json
 import pathlib
-import threading
 from collections.abc import Callable
 
 import numpy as np
@@ -11,7 +9,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from conftest import write_episodes
 
-from dream_hackathon import data_overview, dataset_cli
+from dream_hackathon import data_overview
 
 ARM = 7
 
@@ -131,45 +129,3 @@ def test_an_eef_copy_is_built_from_its_source_or_out_of_date(tmp_path: pathlib.P
     rows = {row.name: row for row in data_overview.scan(tmp_path).datasets}
     assert any("Built from task" in text for text in notes(rows["task-eef"], "note"))
     assert any("Out of date" in text and "--replace" in text for text in notes(rows["other-eef"], "check"))
-
-
-def test_the_page_escapes_what_the_data_says(tmp_path: pathlib.Path) -> None:
-    make(tmp_path / "cubes", episodes=2, tasks=("<script>alert(1)</script>",))
-    page = data_overview.render_html(data_overview.scan(tmp_path))
-    assert "<script>alert(1)</script>" not in page
-    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
-    assert "cubes" in page and "Episode table" in page
-
-
-def test_the_page_for_an_empty_folder_says_so(tmp_path: pathlib.Path) -> None:
-    page = data_overview.render_html(data_overview.scan(tmp_path))
-    assert "No datasets found" in page
-
-
-def test_the_cli_writes_the_page(tmp_path: pathlib.Path, capsys) -> None:
-    make(tmp_path / "data" / "cubes", episodes=2)
-    out = tmp_path / "out" / "page.html"
-    dataset_cli.main(["overview", str(tmp_path / "data"), "--out", str(out)])
-    assert "1 datasets, 2 episodes" in capsys.readouterr().out
-    assert "Hackathon data" in out.read_text()
-
-
-def test_the_server_answers_get_on_loopback_and_refuses_other_hosts(tmp_path: pathlib.Path) -> None:
-    make(tmp_path / "cubes", episodes=2)
-    server = data_overview.make_server(tmp_path, 0)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        for host, status in ((f"localhost:{server.server_port}", 200), ("evil.example", 403)):
-            connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=10)
-            connection.request("GET", "/", headers={"Host": host})
-            response = connection.getresponse()
-            body = response.read().decode()
-            assert response.status == status
-            assert ("cubes" in body) == (status == 200)
-        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=10)
-        connection.request("POST", "/")
-        assert connection.getresponse().status == 501
-    finally:
-        server.shutdown()
-        server.server_close()

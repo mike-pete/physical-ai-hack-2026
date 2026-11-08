@@ -406,6 +406,149 @@ def drop_episodes(root: pathlib.Path, drop: set[int]) -> int:
     return len(kept)
 
 
+def task_rows(root: pathlib.Path) -> list[dict[str, Any]]:
+    """The rows of `meta/tasks.jsonl`, in file order."""
+    path = root / "meta" / "tasks.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def _set_task_index(path: pathlib.Path, task_index: int) -> int:
+    """Makes every row of one episode's parquet carry `task_index`; leaves the file alone when it already does.
+
+    @return The episode's row count.
+    """
+    table = pq.read_table(path)
+    if table.num_rows and bool((table["task_index"].to_numpy() == task_index).all()):
+        return table.num_rows
+    column = pa.array(np.full(table.num_rows, task_index, dtype=np.int64))
+    table = table.set_column(table.schema.get_field_index("task_index"), "task_index", column)
+    partial = path.with_suffix(".parquet.partial")
+    pq.write_table(table, partial)
+    os.replace(partial, path)
+    return table.num_rows
+
+
+def retask_episodes(root: pathlib.Path, episodes: set[int], task: str) -> None:
+    """Gives some episodes another task text, keeping `meta/` and every frame's `task_index` in step.
+
+    The task's text lives in `meta/tasks.jsonl` (under a `task_index`), in each episode's row of `episodes.jsonl`, and
+    as that index in every frame of the episode's parquet and in its statistics; this changes all of them. When the
+    episodes are every one of a task, its row is renamed in place. When `task` is already a task of the dataset, they
+    join it. Otherwise it is a new task with the next free index. A task left with no episodes stays listed, as after
+    drop_episodes().
+
+    @param root The dataset folder. Do not run it while a collector records into the folder.
+    @param episodes The episodes' indices; each must have exactly one task.
+    @param task The new text.
+    @throws DatasetError An index is not an episode of the dataset, an episode has several tasks, or `task` is empty.
+    """
+    task = task.strip()
+    if not task:
+        raise DatasetError("a task needs a text")
+    known = {episode.index: episode for episode in list_episodes(root)}
+    unknown = sorted(episodes - set(known))
+    if unknown:
+        raise DatasetError(f"{root} has no episode {unknown[0]} (it has 0 to {len(known) - 1})")
+    for index in sorted(episodes):
+        if len(known[index].tasks) != 1:
+            raise DatasetError(
+                f"episode {index} has {len(known[index].tasks)} tasks; only one-task episodes can be renamed"
+            )
+    if not episodes:
+        return
+    meta = root / "meta"
+    rows = task_rows(root)
+    index_of = {row["task"]: int(row["task_index"]) for row in rows}
+    old_texts = {known[index].tasks[0] for index in episodes}
+    only = next(iter(old_texts)) if len(old_texts) == 1 else None
+    all_of_it = only is not None and all(e.index in episodes for e in known.values() if e.tasks == (only,))
+    if task in index_of:
+        target = index_of[task]
+    elif all_of_it and only in index_of:
+        target = index_of[only]
+        for row in rows:
+            if row["task"] == only:
+                row["task"] = task
+    else:
+        target = max((int(row["task_index"]) for row in rows), default=-1) + 1
+        rows.append({"task_index": target, "task": task})
+    _write_lines(meta / "tasks.jsonl", rows)
+
+    stats_path = meta / "episodes_stats.jsonl"
+    stats = (
+        [json.loads(line) for line in stats_path.read_text().splitlines() if line.strip()]
+        if stats_path.exists()
+        else []
+    )
+    for entry in stats:
+        index = int(entry["episode_index"])
+        if index in episodes:
+            frames = _set_task_index(
+                root / DATA_PATH.format(episode_chunk=index // CHUNKS_SIZE, episode_index=index), target
+            )
+            entry["stats"]["task_index"] = _scalar_stats(np.full(frames, target))
+    if stats:
+        _write_lines(stats_path, stats)
+    _write_lines(
+        meta / "episodes.jsonl",
+        [
+            {"episode_index": e.index, "tasks": [task] if e.index in episodes else list(e.tasks), "length": e.frames}
+            for e in known.values()
+        ],
+    )
+    info = json.loads((meta / "info.json").read_text())
+    info["total_tasks"] = len(rows)
+    _write_json(meta / "info.json", info)
+
+
+def forget_task(root: pathlib.Path, task: str) -> None:
+    """Removes a task no episode uses from `meta/tasks.jsonl`, and numbers the tasks left 0, 1, 2, ... again.
+
+    A task whose index moves down has its episodes' parquets and statistics rewritten to match. Nothing happens when
+    `task` is not listed.
+
+    @param root The dataset folder. Do not run it while a collector records into the folder.
+    @param task The task's text.
+    @throws DatasetError An episode still uses the task, or one that must move has several tasks.
+    """
+    episodes = list_episodes(root)
+    if any(task in episode.tasks for episode in episodes):
+        raise DatasetError(f"episodes still use the task \u201c{task}\u201d")
+    rows = sorted(task_rows(root), key=lambda row: int(row["task_index"]))
+    kept = [row for row in rows if row["task"] != task]
+    if len(kept) == len(rows):
+        return
+    old = {row["task"]: int(row["task_index"]) for row in kept}
+    new = {row["task"]: position for position, row in enumerate(kept)}
+    moved = {text for text in new if new[text] != old[text]}
+    affected = [episode for episode in episodes if set(episode.tasks) & moved]
+    for episode in affected:
+        if len(episode.tasks) != 1:
+            raise DatasetError(f"episode {episode.index} has several tasks, so the tasks cannot be renumbered")
+    meta = root / "meta"
+    stats_path = meta / "episodes_stats.jsonl"
+    stats = (
+        [json.loads(line) for line in stats_path.read_text().splitlines() if line.strip()]
+        if stats_path.exists()
+        else []
+    )
+    by_episode = {int(entry["episode_index"]): entry for entry in stats}
+    for episode in affected:
+        target = new[episode.tasks[0]]
+        path = root / DATA_PATH.format(episode_chunk=episode.index // CHUNKS_SIZE, episode_index=episode.index)
+        frames = _set_task_index(path, target)
+        if episode.index in by_episode:
+            by_episode[episode.index]["stats"]["task_index"] = _scalar_stats(np.full(frames, target))
+    if stats and affected:
+        _write_lines(stats_path, stats)
+    _write_lines(meta / "tasks.jsonl", [{"task_index": new[row["task"]], "task": row["task"]} for row in kept])
+    info = json.loads((meta / "info.json").read_text())
+    info["total_tasks"] = len(kept)
+    _write_json(meta / "info.json", info)
+
+
 def _features(
     state_names: list[str],
     video_keys: list[str],

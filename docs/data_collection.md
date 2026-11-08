@@ -145,6 +145,22 @@ uv run dhk-dataset drop ~/hackathon_data/myteam-cubes 3        # asks first; sev
 
 The episodes after it are renumbered, so check `list` again before dropping another. `dhk-dataset` refuses the folder a running `dhk-collect` records into: use the dashboard then. On a Metal or Maker arm, rebuild the dataset you fine-tune on afterwards with `tools/add_eef.py ... --replace`.
 
+## Browse and tidy everything you recorded
+
+`dhk-dataset overview` serves a page about every dataset in a folder (`~/hackathon_data`): each task, and under it the dataset folders that hold its episodes, one block per episode. Click a block to watch that episode's three cameras, as saved. It flags what looks wrong (an arm that never moves, a recording stored in more than one dataset, files that disagree with the metadata) and lets you rename a task, delete episodes or a task, and rename a dataset folder.
+
+```bash
+# 🤖 on the station (in tmux)
+uv run dhk-dataset overview --port 9000 --config configs/station.yaml
+```
+
+```bash
+# 💻 on your laptop, then open http://localhost:9000
+ssh -L 9000:localhost:9000 pah@<ip_address>
+```
+
+The page listens on the station only. Its renames and deletes change your recorded files, so each one lists exactly what it will do and waits for your tick. Dream's local dataset checks accept the result, but a task or episode you delete is gone. While `dhk-collect` or `mirror_collect.py` records into a folder, the page shows "Recording now" for it and refuses to edit it. On a Metal or Maker arm, rebuild the dataset you fine-tune on afterwards with `tools/add_eef.py ... --replace`, because the `-eef` copy does not follow an edit. Every edit is also logged in `~/.cache/dream_hackathon/data_edits.log`.
+
 ## Where your data is stored
 
 Your data stays on the station, in the folder you pass with `--dataset-dir` (without it, the folder the config's `dataset_dir` names). It is not in the repo, and nothing is uploaded until you fine-tune. Each folder is one LeRobot v2.1 dataset, and every session adds to it:

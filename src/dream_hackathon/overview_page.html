@@ -1,0 +1,1061 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Hackathon data</title>
+<style>
+
+:root{color-scheme:light dark;--page:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;
+--grid:#e1e0d9;--axis:#c3c2b7;--border:rgba(11,11,11,.10);--seq:#2a78d6;--on-s4:#0b0b0b;
+--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#6250d6;--s0:#898781;
+--good:#0ca30c;--warning:#fab219;--critical:#d03b3b;--info:#898781}
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1180px;margin:0 auto;padding:24px 16px 64px;display:grid;grid-template-columns:minmax(0,1fr);gap:16px}
+h1{font-size:28px;margin:0 0 4px}h2{font-size:18px;margin:0 0 4px}
+.muted{color:var(--ink2);font-size:13px;margin:0}.lead{margin:0 0 16px}
+code{font:12px ui-monospace,monospace;overflow-wrap:anywhere}
+a{color:inherit;text-decoration-color:var(--axis)}a:focus-visible,button:focus-visible,select:focus-visible{outline:2px solid var(--seq);outline-offset:2px}
+.crumbs{margin:0 0 8px;font-size:13px}.gap{height:12px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px}
+.card header{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:flex-start;justify-content:space-between}
+.summary{display:flex;flex-wrap:wrap;gap:6px 32px;align-items:baseline}
+.summary b{font-size:26px;font-weight:600;margin-right:6px}
+.ic{display:inline-flex;width:16px;justify-content:center;margin-right:6px;font-size:12px;font-weight:700;flex:none}
+.ic.good{color:var(--good)}.ic.warning{color:var(--warning)}.ic.critical{color:var(--critical)}.ic.info{color:var(--info)}
+.chip{display:inline-flex;align-items:center;font-size:13px;white-space:nowrap}
+.strips{display:grid;grid-template-columns:260px minmax(0,1fr) 110px;gap:18px 20px;align-items:center}
+.nm .big{display:block;font-size:15px;font-weight:600}.nm .muted{display:block}
+.pills{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.pill{font-size:12px;border:1px solid var(--border);border-radius:999px;padding:1px 10px 1px 4px;display:inline-flex;align-items:center}
+.strip{display:flex;gap:2px;height:28px}
+.blk{border-radius:4px;font-size:11px;color:#fff;display:flex;align-items:center;padding-left:6px;min-width:2px;
+text-decoration:none;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden}
+.blk:hover{filter:brightness(1.12);outline:2px solid var(--ink);outline-offset:-2px}
+.axis{position:relative;height:18px;font-size:11px;color:var(--muted);grid-column:2}
+.axis span{position:absolute;transform:translateX(-50%)}.axis span:first-child{transform:none}
+.s1{background:var(--s1)}.s2{background:var(--s2)}.s3{background:var(--s3)}.s4{background:var(--s4)}
+.s5{background:var(--s5)}.s6{background:var(--s6)}.s7{background:var(--s7)}.s0{background:var(--s0)}
+.blk.s4{color:var(--on-s4)}
+.legend{list-style:none;margin:16px 0 0;padding:0;display:flex;flex-wrap:wrap;gap:6px 22px;font-size:13px}
+.legend li{display:flex;align-items:center;gap:8px}.sw{width:12px;height:12px;border-radius:3px;flex:none}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.items{list-style:none;margin:12px 0 0;padding:0;display:grid;gap:8px;font-size:14px}.items li{display:flex;align-items:baseline}
+.scroll{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{text-align:left;padding:8px 12px 8px 0;border-bottom:1px solid var(--grid);vertical-align:middle;
+font-variant-numeric:tabular-nums}
+th{color:var(--ink2);font-weight:500}
+.shell{display:grid;grid-template-columns:270px minmax(0,1fr);gap:16px;align-items:start}
+.main{display:grid;gap:16px;min-width:0}
+.rail{display:grid;gap:4px;position:sticky;top:16px}
+.rail h4{margin:0 0 6px 12px;font-size:12px;font-weight:500;color:var(--ink2);text-transform:uppercase;letter-spacing:.04em}
+.item{display:grid;grid-template-columns:22px 1fr;padding:10px 12px;border-radius:8px;border:1px solid transparent;text-decoration:none}
+.item:hover{background:color-mix(in srgb,var(--ink) 5%,transparent)}
+.item.on{background:var(--surface);border-color:var(--border)}.item .muted{grid-column:2}
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;margin:16px 0}
+.facts span{display:block;font-size:12px;color:var(--ink2)}.facts b{font-weight:600;font-size:14px}
+.notes{list-style:none;margin:0;padding:0;display:grid;gap:4px;font-size:14px}
+.notes li{display:flex;align-items:baseline}.sr{position:absolute;left:-9999px}
+.vids{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:16px}
+figure{margin:0}video,.novideo{width:100%;aspect-ratio:16/9;border-radius:8px;background:#000;display:block}
+.novideo{display:grid;place-items:center;color:var(--muted);font-size:13px;border:1px dashed var(--axis);background:none}
+figcaption{font-size:12px;color:var(--ink2);margin-top:4px}
+.steps{display:flex;gap:8px}.step{font-size:13px;border:1px solid var(--border);border-radius:8px;padding:4px 12px;text-decoration:none}
+.step.off{color:var(--muted);border-style:dashed}a.step:hover{background:color-mix(in srgb,var(--ink) 5%,transparent)}
+.controls{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-top:14px;font-size:13px}
+button,select{font:inherit;font-size:13px;color:var(--ink);background:var(--surface);border:1px solid var(--axis);border-radius:8px;padding:4px 12px}
+button{cursor:pointer}button:hover{background:color-mix(in srgb,var(--ink) 5%,transparent)}
+.episodes tbody tr{position:relative}.episodes td{white-space:nowrap}
+.episodes tbody tr:hover td{background:color-mix(in srgb,var(--ink) 5%,transparent)}
+.episodes tr[aria-current] td{background:color-mix(in srgb,var(--seq) 12%,transparent)}
+.rowlink{text-decoration:none;font-weight:600}.rowlink::after{content:"";position:absolute;inset:0}
+.lbw{display:inline-block;width:200px;margin-right:10px;vertical-align:middle}
+.lb{display:block;height:10px;border-radius:0 4px 4px 0;min-width:2px}
+
+/* all white, light only */
+:root{color-scheme:light;--page:#fff;--surface:#fff}
+html,body{background:#fff}
+.steps{flex-wrap:wrap;justify-content:flex-end}
+.main{grid-template-columns:minmax(0,1fr)}
+#player{scroll-margin-top:56px}
+.episodes td:nth-child(3){white-space:normal;min-width:240px}
+.btn{font:inherit;font-size:13px;color:var(--ink);background:#fff;border:1px solid var(--axis);border-radius:8px;padding:4px 12px;cursor:pointer}
+.btn:hover{background:color-mix(in srgb,var(--ink) 5%,transparent)}
+.btn.danger{border-color:var(--critical)}
+.btn.primary{background:var(--seq);border-color:var(--seq);color:#fff}
+.btn.destroy{background:var(--critical);border-color:var(--critical);color:#fff}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.sep{width:1px;background:var(--grid);margin:0 4px}
+.swh{display:inline-block;width:12px;height:12px;border-radius:3px;border:1px dashed var(--axis);margin-right:8px;vertical-align:-1px}
+.tasks td.act{text-align:right}
+.tname{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap}
+.icon-btn{font:inherit;font-size:13px;line-height:1;border:1px solid transparent;background:none;color:var(--ink2);border-radius:6px;padding:3px 6px;cursor:pointer}
+.icon-btn:hover,.icon-btn:focus-visible{border-color:var(--axis);color:var(--ink)}
+.editor{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.editor input{font:inherit;font-size:14px;padding:5px 9px;border:1px solid var(--seq);border-radius:8px;min-width:min(420px,100%);color:var(--ink);background:#fff}
+.editor .muted{flex-basis:100%}
+.legend li.editing{flex-basis:100%;align-items:flex-start}
+td .editor input{min-width:min(360px,100%)}
+.dsname{display:inline-flex;align-items:center;gap:2px}
+.nm .dsname .big{display:inline}
+h1.dsname .icon-btn{font-size:18px;margin-left:4px}
+.pathfield{display:flex;align-items:center;border:1px solid var(--axis);border-radius:8px;background:#fff;overflow:hidden}
+.pathfield:focus-within{border-color:var(--seq);box-shadow:0 0 0 1px var(--seq)}
+.pathfield .prefix{padding:8px 0 8px 10px;color:var(--ink2);font:13px ui-monospace,monospace;white-space:nowrap}
+.dlg .pathfield input[type=text]{border:0;border-radius:0;padding:8px 10px 8px 1px;font:14px ui-monospace,monospace;flex:1;min-width:0;outline:none}
+.err{margin:0;font-size:13px;display:flex;align-items:baseline}
+.err[hidden]{display:none}
+.btn.sm{padding:2px 10px;font-size:12px}
+.tasktitle{display:flex;align-items:flex-start;gap:8px;margin:4px 0 2px;font-size:17px;font-weight:600;line-height:1.35}
+.tasktitle .sw{flex:none}
+.tasktitle .tname{display:block;min-width:0}
+.tasktitle .tname>span:first-child{display:inline;overflow-wrap:anywhere}
+.tasktitle .tname>.icon-btn{display:inline;margin-left:4px}
+.tasktitle .sw{margin-top:6px}
+.previewnote{display:flex;align-items:baseline;margin:14px 0 0;padding:8px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--ink);background:#fbfbfa}
+.blk .wn{margin-left:auto;margin-right:4px;flex:none;overflow:visible}
+.stillnote{display:flex;align-items:baseline;font-size:12px;color:var(--ink2);margin-top:2px}
+.stillbar{display:flex;align-items:baseline;margin:6px 0 0;font-size:13px;color:var(--ink)}
+.folderrow{grid-column:1/-1;display:grid;grid-template-columns:340px minmax(0,1fr);gap:0 20px;align-items:center;position:relative}
+.folderrow::before{content:"";position:absolute;inset:-4px -10px;border-radius:8px;pointer-events:none}
+.folderrow:hover::before{background:color-mix(in srgb,var(--ink) 5%,transparent)}
+.folderrow a.folder{text-decoration-color:var(--axis)}
+.folderrow a.folder::after{content:"";position:absolute;inset:-4px -10px;border-radius:8px;z-index:1;cursor:pointer}
+.folderrow a.folder:focus-visible{outline:none}
+.folderrow a.folder:focus-visible::after{outline:2px solid var(--seq)}
+.folderrow .strip{position:relative;z-index:2}
+.folders tbody tr{position:relative}
+.folders tbody tr:hover td,.folders tbody tr:hover th{background:color-mix(in srgb,var(--ink) 5%,transparent)}
+.folders .rowlink{text-decoration:underline;text-decoration-color:var(--axis)}
+.folders .icon-btn{position:relative;z-index:2}
+.tasksview{display:grid;grid-template-columns:340px minmax(0,1fr);gap:6px 20px;align-items:center}
+.taskhead{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:14px;padding-top:14px;border-top:1px solid var(--grid);font-weight:600}
+.taskhead:first-child{margin-top:0;padding-top:0;border-top:0}
+.taskhead .muted{font-weight:400}
+.taskhead .sw{width:14px;height:14px}
+.tasksview .sub{padding-left:24px;font-size:13px}
+.tasksview .strip{height:24px}
+.tasksview .axis{grid-column:2;margin-top:8px}
+.folders tbody th{font-weight:600;color:var(--ink);white-space:nowrap}
+.folders .pills{margin-top:0}
+.folders td:not(:last-child),.folders th{white-space:nowrap}
+.episodes th.sel,.episodes td.sel{width:30px;position:relative;z-index:2}
+.episodes td.sel input,.episodes th.sel input{width:16px;height:16px;cursor:pointer;margin:0}
+.tablebar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:0 0 8px;min-height:32px}
+.tasks td:not(:first-child),.btn{white-space:nowrap}
+.dlg{border:1px solid var(--border);border-radius:12px;padding:0;width:min(520px,calc(100% - 32px));background:#fff;color:var(--ink);box-shadow:0 16px 48px rgba(0,0,0,.22)}
+.dlg::backdrop{background:rgba(11,11,11,.28)}
+.dlg-body{padding:22px;display:grid;gap:12px}
+.dlg h2{margin:0;font-size:18px}
+.dlg ul{margin:0;padding-left:18px;display:grid;gap:6px;font-size:14px}
+.dlg label.f{display:grid;gap:4px;font-size:13px;color:var(--ink2)}
+.dlg label.chk{display:flex;gap:8px;align-items:flex-start;font-size:13px}
+.dlg input[type=text]{font:inherit;font-size:14px;padding:8px 10px;border:1px solid var(--axis);border-radius:8px;color:var(--ink);background:#fff;width:100%}
+.dlg .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:4px}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#fff;border:1px solid var(--border);box-shadow:0 8px 28px rgba(0,0,0,.2);border-radius:10px;padding:10px 16px;font-size:13px;z-index:50;max-width:min(560px,calc(100% - 32px))}
+.bar{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:8px 16px}
+.chip.rec{font-weight:600}
+.recdot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--critical);margin-right:8px;flex:none}
+.recbar{display:flex;align-items:baseline;margin:10px 0 0;padding:8px 12px;border:1px solid var(--critical);border-radius:8px;font-size:13px}
+.toast.bad{border-color:var(--critical);display:flex;align-items:baseline}
+
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script id="boot" type="application/json">__BOOT__</script>
+<script>
+(function () {
+  var DATA = null;
+  var app = document.getElementById('app');
+  var holdScroll = false;
+  var picked = { ds: null, eps: [] };
+  function pickedFor(ds) {
+    if (picked.ds !== ds) picked = { ds: ds, eps: [] };
+    picked.eps = picked.eps.filter(function (e) { return ds.episodes.indexOf(e) >= 0; });
+    return picked.eps;
+  }
+
+  // ---- tiny DOM helper: text always goes in as text nodes, never as markup
+  function h(tag, attrs, kids) {
+    var el = document.createElement(tag);
+    Object.keys(attrs || {}).forEach(function (k) {
+      var v = attrs[k];
+      if (v === null || v === undefined || v === false) return;
+      if (k === 'class') el.className = v;
+      else if (k === 'style') el.style.cssText = v;
+      else el.setAttribute(k, v === true ? '' : v);
+    });
+    (kids || []).forEach(function (c) {
+      if (c === null || c === undefined || c === false) return;
+      el.appendChild(typeof c === 'object' ? c : document.createTextNode(String(c)));
+    });
+    return el;
+  }
+  var ICONS = { good: '✓', warning: '▲', critical: '✕', info: 'i' };
+  function icon(kind) { return h('span', { class: 'ic ' + kind, 'aria-hidden': 'true' }, [ICONS[kind]]); }
+  function statusKind(ds) { return { ok: 'good', check: 'warning', problem: 'critical' }[ds.status]; }
+  function chip(ds) {
+    if (ds.recording) return h('span', { class: 'chip rec', title: ds.recording }, [h('span', { class: 'recdot', 'aria-hidden': 'true' }), 'Recording now']);
+    return h('span', { class: 'chip' }, [icon(statusKind(ds)), ds.chip]);
+  }
+  function link(name, ep) { return '#/d/' + encodeURIComponent(name) + (ep === undefined ? '' : '/' + ep); }
+  function find(name) { return DATA.datasets.filter(function (d) { return d.name === name; })[0]; }
+  function legend(items, editable) {
+    return h('ul', { class: 'legend' }, items.map(function (i) {
+      return h('li', {}, [h('span', { class: 'sw s' + i.slot }), editable ? taskName(i.task) : h('span', {}, [i.task || 'no task']), i.extra ? h('span', { class: 'muted' }, [i.extra]) : null]);
+    }));
+  }
+  function idx(e) { return e.index; }
+  function plural(n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); }
+  function fmtDur(s) { return s >= 3600 ? (s / 3600).toFixed(1) + ' h' : s >= 120 ? Math.round(s / 60) + ' min' : Math.round(s) + ' s'; }
+  function fmtSize(n) {
+    var u = ['B', 'KB', 'MB', 'GB'], i = 0;
+    while (n >= 1024 && i < 3) { n /= 1024; i++; }
+    return (i === 0 || n >= 100 ? n.toFixed(0) : n.toFixed(1)) + ' ' + u[i];
+  }
+  function spanText(nums) {
+    var parts = [], i = 0;
+    nums = nums.slice().sort(function (a, b) { return a - b; });
+    while (i < nums.length) {
+      var j = i;
+      while (j + 1 < nums.length && nums[j + 1] === nums[j] + 1) j++;
+      parts.push(j > i ? nums[i] + '–' + nums[j] : String(nums[i]));
+      i = j + 1;
+    }
+    return parts.join(', ');
+  }
+
+  // ---- data: loaded from the server, which scans the folders; every action is a request and then a reload
+  var SLOTS_KEY = 'dhk-task-slots';
+  function storedSlots() { try { return JSON.parse(localStorage.getItem(SLOTS_KEY) || '{}'); } catch (e) { return {}; } }
+  function saveSlots(map) { try { localStorage.setItem(SLOTS_KEY, JSON.stringify(map)); } catch (e) {} }
+  // A task keeps its colour from one load to the next, and through a rename (colour follows the task, not its rank).
+  function keepColour(from, to) {
+    var map = storedSlots();
+    if (map[from] && !map[to]) map[to] = map[from];
+    delete map[from];
+    saveSlots(map);
+  }
+  function prepare() {
+    var stored = storedSlots(), order = Object.keys(DATA.slots), used = {}, slots = {};
+    order.forEach(function (t) { var s = stored[t]; if (s >= 1 && s <= 7 && !used[s]) { slots[t] = s; used[s] = true; } });
+    order.forEach(function (t) {
+      if (slots[t] !== undefined) return;
+      var n = 1;
+      while (used[n] && n <= 7) n++;
+      slots[t] = n <= 7 ? n : 0;
+      if (n <= 7) used[n] = true;
+    });
+    DATA.slots = slots;
+    DATA.datasets.forEach(function (ds) {
+      ds.episodes.forEach(function (e) { e.slot = slots[e.task]; });
+      ds.tasks.forEach(function (t) { t.slot = slots[t.task]; });
+    });
+    saveSlots(slots);
+  }
+  function load() {
+    return fetch('/api/overview', { cache: 'no-store' }).then(function (r) {
+      if (!r.ok) throw new Error('the server answered ' + r.status);
+      return r.json();
+    }).then(function (j) { DATA = j; prepare(); });
+  }
+  function reload() {
+    return load().then(function () { holdScroll = true; render(); }, function (e) { toast('Could not reload: ' + e.message, true); });
+  }
+  function act(path, body) {
+    return fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Dashboard': '1' }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+      .catch(function (e) { return { ok: false, body: { error: 'Could not reach the server: ' + e.message } }; });
+  }
+  // After an action: close its dialog, read what is on disk now, go to where `after()` says (a hash) or stay, and say
+  // what happened. A refusal is shown as it is, and the page still shows what is really there.
+  function finish(d, res, after) {
+    if (d) closeDialog(d);
+    return load().then(function () {
+      if (!res.ok) { toast(res.body.error || 'The action failed.', true); holdScroll = true; render(); return; }
+      var hash = after ? after() : null;
+      if (hash) navigate(hash, true); else { holdScroll = true; render(); }
+      toast(res.body.message);
+    }, function (e) { toast('Could not reload: ' + e.message, true); });
+  }
+  // A dataset a recorder is writing into now: nothing in it can be edited until the recorder stops.
+  function busy(ds) { return !!ds.recording; }
+  function busyTitle(ds) { return 'Being recorded into by ' + ds.recording + ': stop it first'; }
+  function busyHolders(task) {
+    return DATA.datasets.filter(function (ds) { return busy(ds) && ds.episodes.some(function (e) { return e.task === task; }); });
+  }
+
+  // ---- dialogs and toast
+  function closeDialog(d) { if (d.close) d.close(); d.remove(); }
+  function dialog(children) {
+    var d = h('dialog', { class: 'dlg' }, [h('div', { class: 'dlg-body' }, children)]);
+    document.body.appendChild(d);
+    d.addEventListener('close', function () { d.remove(); });
+    d.addEventListener('click', function (e) { if (e.target === d) closeDialog(d); });
+    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    return d;
+  }
+  function toast(text, bad) {
+    var t = h('div', { class: 'toast' + (bad ? ' bad' : ''), role: bad ? 'alert' : 'status' }, [bad ? icon('critical') : null, text]);
+    document.body.appendChild(t);
+    setTimeout(function () { t.remove(); }, bad ? 12000 : 6000);
+  }
+  function button(label, cls, onClick) {
+    var b = h('button', { type: 'button', class: 'btn' + (cls ? ' ' + cls : '') }, [label]);
+    if (onClick) b.addEventListener('click', onClick);
+    return b;
+  }
+
+  // Rename: an episode is named by its task text, the sentence the model is trained to follow.
+  function askRename(ds, ep) {
+    var same = ds.episodes.filter(function (e) { return e !== ep && e.task === ep.task; });
+    var input = h('input', { type: 'text', value: ep.task, 'aria-label': 'Task text', autocomplete: 'off' });
+    var all = h('input', { type: 'checkbox' });
+    var save = button('Rename', 'primary');
+    var cancel = button('Cancel');
+    var d = dialog([
+      h('h2', {}, ['Rename episode ' + ep.index]),
+      h('p', { class: 'muted' }, [ds.name + ' · an episode is named by its task text, the sentence the model is trained to follow.']),
+      h('label', { class: 'f' }, ['Task text', input]),
+      same.length ? h('label', { class: 'chk' }, [all, h('span', {}, ['Also rename the ' + plural(same.length, 'other episode') + ' with the same task (' + spanText(same.map(function (e) { return e.index; })) + ')'])]) : null,
+      h('p', { class: 'muted' }, ['Updates meta/ (tasks.jsonl, episodes.jsonl, episodes_stats.jsonl) and each episode\u2019s task_index. The videos stay as they are.']),
+      h('div', { class: 'actions' }, [cancel, save])
+    ]);
+    function check() { var v = input.value.trim(); save.disabled = v === '' || v === ep.task; }
+    input.addEventListener('input', check); check();
+    input.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !save.disabled) save.click(); });
+    cancel.addEventListener('click', function () { closeDialog(d); });
+    save.addEventListener('click', function () {
+      var old = ep.task, text = input.value.trim();
+      var which = ds.episodes.filter(function (e) { return e === ep || (all.checked && e.task === old); }).map(idx);
+      var remains = DATA.datasets.some(function (o) {
+        return o.episodes.some(function (e) { return e.task === old && !(o === ds && which.indexOf(e.index) >= 0); });
+      });
+      save.disabled = true;
+      act('/api/rename-episodes', { dataset: ds.name, episodes: which, task: text }).then(function (res) {
+        if (res.ok && !remains) keepColour(old, text);
+        return finish(d, res);
+      });
+    });
+    input.focus(); input.select();
+    return d;
+  }
+
+  // Delete: says exactly what goes, what is renumbered and what to rebuild; Cancel has the focus.
+  function askDelete(ds, ep) {
+    var later = ds.episodes.filter(function (e) { return e.index > ep.index; });
+    var lines = [
+      h('li', {}, ['Deletes its data file and ' + plural(ds.cameras.length, 'video file') + ' (' + fmtSize(ep.bytes) + ').']),
+      later.length
+        ? h('li', {}, ['Renumbers the ' + plural(later.length, 'episode') + ' after it: ' + spanText(later.map(function (e) { return e.index; })) + ' become ' + spanText(later.map(function (e) { return e.index - 1; })) + '.'])
+        : h('li', {}, ['It is the last episode, so no other episode is renumbered.'])
+    ];
+    if (!ds.episodes.some(function (e) { return e !== ep && e.task === ep.task; })) {
+      lines.push(h('li', {}, ['It is the last episode of the task “' + ep.task + '”. The task stays listed in meta/tasks.jsonl; the Tasks card can delete it.']));
+    }
+    ep.twins.forEach(function (t) {
+      lines.push(h('li', {}, ['The same recording is also stored in ' + t.dataset + ' (episode ' + t.index + '). That copy stays.']));
+    });
+    if (ds.robot === 'metal' || ds.robot === 'maker') {
+      lines.push(h('li', {}, ['Afterwards rebuild the dataset you fine-tune on: ~/dream-env/bin/python tools/add_eef.py ' + ds.path + ' --arm ' + ds.robot + ' --replace']));
+    }
+    var cancel = button('Cancel'), go = button('Delete episode ' + ep.index, 'destroy');
+    var d = dialog([
+      h('h2', {}, ['Delete episode ' + ep.index + '?']),
+      h('p', { class: 'muted' }, [ds.name + ' · ' + (ep.task || 'no task') + ' · ' + ep.clock]),
+      h('ul', {}, lines),
+      h('p', {}, [h('b', {}, ['This cannot be undone.'])]),
+      h('p', { class: 'muted' }, ['Refused while a recorder (dhk-collect or mirror_collect.py) is writing into this folder.']),
+      h('div', { class: 'actions' }, [cancel, go])
+    ]);
+    cancel.addEventListener('click', function () { closeDialog(d); });
+    go.addEventListener('click', function () {
+      go.disabled = true;
+      act('/api/delete-episodes', { dataset: ds.name, episodes: [ep.index] }).then(function (res) {
+        return finish(d, res, function () {
+          var fresh = find(ds.name);
+          return fresh && fresh.episodes.length ? link(ds.name, Math.min(ep.index, fresh.episodes.length - 1)) : link(ds.name);
+        });
+      });
+    });
+    cancel.focus();
+    return d;
+  }
+
+  // Replaces the address (renumbered episodes make the old one wrong) and draws again, keeping the scroll position.
+  function navigate(hash, hold) {
+    holdScroll = !!hold;
+    if (location.hash === hash) { render(); return; }
+    try { history.replaceState(null, '', hash); render(); } catch (e) { location.hash = hash; }
+  }
+
+  // Delete a task. One no episode uses is just dropped from tasks.jsonl. One that episodes use takes them with it
+  // (an episode cannot be left without a task), after the person ticks the exact episodes.
+  function askDeleteTask(ds, task, sel) {
+    var mine = ds.episodes.filter(function (e) { return e.task === task; });
+    var cancel = button('Cancel'), d, go;
+    var heading = h('h2', {}, ['Delete the task “' + (task || 'no task') + '”?']);
+    if (!mine.length) {
+      go = button('Delete task', 'destroy');
+      d = dialog([
+        heading,
+        h('p', { class: 'muted' }, [ds.name + ' · no episode uses this task, so no episode changes.']),
+        h('ul', {}, [h('li', {}, ['Removes it from meta/tasks.jsonl.'])]),
+        h('div', { class: 'actions' }, [cancel, go])
+      ]);
+      cancel.addEventListener('click', function () { closeDialog(d); });
+      go.addEventListener('click', function () {
+        go.disabled = true;
+        act('/api/delete-task', { task: task, dataset: ds.name }).then(function (res) { return finish(d, res); });
+      });
+      cancel.focus();
+      return d;
+    }
+    var rest = ds.episodes.filter(function (e) { return e.task !== task; });
+    var bytes = mine.reduce(function (a, e) { return a + e.bytes; }, 0);
+    var moved = rest.filter(function (e, i) { return e.index !== i; });
+    var which = spanText(mine.map(idx));
+    var lines = [h('li', {}, ['Deletes ' + plural(mine.length, 'episode') + ' (' + which + '): their data files and ' + plural(mine.length * ds.cameras.length, 'video file') + ' (' + fmtSize(bytes) + ').'])];
+    if (!rest.length) lines.push(h('li', {}, ['It is the dataset’s only task, so the dataset is left with no episodes.']));
+    else if (moved.length) lines.push(h('li', {}, ['Renumbers the ' + plural(moved.length, 'remaining episode') + ': ' + spanText(moved.map(idx)) + ' become ' + spanText(moved.map(function (e) { return rest.indexOf(e); })) + '.']));
+    var elsewhere = {};
+    mine.forEach(function (e) { e.twins.forEach(function (t) { (elsewhere[t.dataset] = elsewhere[t.dataset] || []).push(e.index); }); });
+    Object.keys(elsewhere).forEach(function (name) {
+      var n = elsewhere[name].length;
+      lines.push(h('li', {}, [(n === 1 ? 'Episode ' : 'Episodes ') + spanText(elsewhere[name]) + (n === 1 ? ' is' : ' are') + ' also stored in ' + name + '. Those copies stay.']));
+    });
+    if (ds.robot === 'metal' || ds.robot === 'maker') {
+      lines.push(h('li', {}, ['Afterwards rebuild the dataset you fine-tune on: ~/dream-env/bin/python tools/add_eef.py ' + ds.path + ' --arm ' + ds.robot + ' --replace']));
+    }
+    var sure = h('input', { type: 'checkbox' });
+    go = button('Delete task and ' + plural(mine.length, 'episode'), 'destroy');
+    go.disabled = true;
+    sure.addEventListener('change', function () { go.disabled = !sure.checked; });
+    d = dialog([
+      heading,
+      h('p', { class: 'muted' }, [ds.name + ' · an episode cannot be left without a task, so its episodes are deleted with it.']),
+      h('ul', {}, lines),
+      h('label', { class: 'chk' }, [sure, h('span', {}, ['Yes, delete ' + (mine.length === 1 ? 'episode ' : 'episodes ') + which + ' along with the task'])]),
+      h('p', {}, [h('b', {}, ['This cannot be undone.'])]),
+      h('p', { class: 'muted' }, ['Refused while a recorder (dhk-collect or mirror_collect.py) is writing into this folder.']),
+      h('div', { class: 'actions' }, [cancel, go])
+    ]);
+    cancel.addEventListener('click', function () { closeDialog(d); });
+    go.addEventListener('click', function () {
+      go.disabled = true;
+      act('/api/delete-task', { task: task, dataset: ds.name }).then(function (res) {
+        return finish(d, res, function () {
+          var at = rest.indexOf(sel);   // the episodes after the deleted ones move down: its place in what is left
+          if (at < 0) at = 0;
+          return rest.length ? link(ds.name, at) : link(ds.name);
+        });
+      });
+    });
+    cancel.focus();
+    return d;
+  }
+
+  // A task name with a pencil. The pencil turns it into an inline editor; a task here is shared by every dataset that
+  // uses it, so the rename applies to all of them and the editor says how many.
+  function taskName(task) {
+    var holder = h('span', { class: 'tname' });
+    function show() {
+      var li = holder.parentNode;
+      if (li && li.classList) li.classList.remove('editing');
+      holder.textContent = '';
+      holder.appendChild(h('span', {}, [task || 'no task']));
+      var pencil = h('button', { type: 'button', class: 'icon-btn', title: 'Rename this task everywhere it is used', 'aria-label': 'Rename the task “' + task + '”', 'data-rename': task }, ['✎']);
+      pencil.addEventListener('click', edit);
+      holder.appendChild(pencil);
+    }
+    function edit() {
+      var users = DATA.datasets.filter(function (ds) { return ds.episodes.some(function (e) { return e.task === task; }); });
+      var count = 0;
+      users.forEach(function (ds) { ds.episodes.forEach(function (e) { if (e.task === task) count++; }); });
+      var input = h('input', { type: 'text', value: task, 'aria-label': 'Task text', autocomplete: 'off' });
+      var save = button('Save', 'primary'), cancel = button('Cancel'), note = h('span', { class: 'muted' });
+      var blocked = busyHolders(task);
+      function check() {
+        var v = input.value.trim();
+        save.disabled = v === '' || v === task || blocked.length > 0;
+        var merge = v !== '' && v !== task && DATA.slots[v] !== undefined;
+        note.textContent = blocked.length
+          ? blocked[0].name + ' is being recorded into by ' + blocked[0].recording + ': stop it first.'
+          : 'Renames it in ' + plural(users.length, 'dataset') + ' (' + plural(count, 'episode') + ')'
+            + (merge ? '. Another task already has this name, so these episodes are merged under it.' : '.');
+      }
+      holder.textContent = '';
+      holder.appendChild(h('span', { class: 'editor' }, [input, save, cancel, note]));
+      var li = holder.parentNode;
+      if (li && li.classList) li.classList.add('editing');
+      input.addEventListener('input', check); check();
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && !save.disabled) save.click();
+        else if (e.key === 'Escape') cancel.click();
+      });
+      cancel.addEventListener('click', show);
+      save.addEventListener('click', function () { save.disabled = true; renameTask(task, input.value.trim()); });
+      input.focus(); input.select();
+    }
+    show();
+    return holder;
+  }
+
+  // Renames a task in every dataset that has it. It keeps its colour; a name another task already has merges the two.
+  function renameTask(old, text) {
+    return act('/api/rename-task', { task: old, to: text }).then(function (res) {
+      if (res.ok) keepColour(old, text);
+      return finish(null, res);
+    });
+  }
+
+  function routeNow() {
+    var m = location.hash.match(/^#\/d\/([^\/]+)(?:\/(\d+))?$/);
+    return { name: m ? decodeURIComponent(m[1]) : null, ep: m && m[2] !== undefined ? parseInt(m[2], 10) : null };
+  }
+
+  function pencilDs(ds) {
+    var b = h('button', { type: 'button', class: 'icon-btn', title: 'Rename this folder', 'aria-label': 'Rename the folder ' + ds.name, 'data-rename-ds': ds.name }, ['✎']);
+    b.addEventListener('click', function (e) { e.preventDefault(); askRenameDataset(ds); });
+    if (busy(ds)) { b.disabled = true; b.title = busyTitle(ds); }
+    return b;
+  }
+
+  // Rename a dataset's folder. It says what else the name is tied to: the -eef copy add_eef.py builds beside it,
+  // the station config that records into it, and the commands that name it.
+  function askRenameDataset(ds) {
+    var sibling = find(ds.name + '-eef');
+    var source = /-eef$/.test(ds.name) ? find(ds.name.slice(0, -4)) : null;
+    var input = h('input', { type: 'text', value: ds.name, 'aria-label': 'New folder name', autocomplete: 'off', spellcheck: 'false' });
+    var also = h('input', { type: 'checkbox', checked: true }), alsoText = h('span', {});
+    var err = h('p', { class: 'err', role: 'alert' });
+    var save = button('Rename', 'primary'), cancel = button('Cancel');
+    var lines = [h('li', {}, ['Moves the folder. Its episodes, videos and metadata stay as they are.'])];
+    if (DATA.stationDirPath && DATA.stationDirPath === ds.path) {
+      lines.push(h('li', {}, ['configs/station.yaml records into ' + DATA.stationDir + '. Change its dataset_dir to the new name, or the next recording starts a new, empty ' + ds.name + '.']));
+    }
+    if (source) {
+      lines.push(h('li', {}, ['This is the copy tools/add_eef.py built from ' + source.name + ' for fine-tuning. Renamed, it no longer pairs with it, and add_eef.py --replace would write ' + ds.name + ' again.']));
+    }
+    lines.push(h('li', {}, ['Commands that name the old folder (tools/add_eef.py, tools/finetune.py, --dataset-dir) need the new name.']));
+    var d = dialog([
+      h('h2', {}, ['Rename the folder “' + ds.name + '”']),
+      h('p', { class: 'muted' }, [DATA.rootShort + '/' + ds.name + ' · ' + plural(ds.episodes.length, 'episode') + ' · ' + ds.size]),
+      h('label', { class: 'f' }, ['New folder name', h('span', { class: 'pathfield' }, [h('span', { class: 'prefix' }, [DATA.rootShort + '/']), input])]),
+      err,
+      sibling ? h('label', { class: 'chk' }, [also, alsoText]) : null,
+      h('ul', {}, lines),
+      h('p', { class: 'muted' }, ['Refused while a recorder (dhk-collect or mirror_collect.py) is writing into this folder.']),
+      h('div', { class: 'actions' }, [cancel, save])
+    ]);
+    function problem(name) {
+      if (!name) return 'Enter a folder name.';
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) return 'Use letters, digits, “-”, “_” and “.”, starting with a letter or digit: no spaces or “/”.';
+      if (name.length > 100) return 'Keep it under 100 characters.';
+      var taken = DATA.datasets.map(function (o) { return o.name; }).concat(DATA.skipped || []);
+      if (taken.indexOf(name) >= 0) return 'A folder called ' + name + ' already exists in ' + DATA.rootShort + '.';
+      if (sibling && also.checked && name + '-eef' !== sibling.name && taken.indexOf(name + '-eef') >= 0) {
+        return 'A folder called ' + name + '-eef already exists, so the -eef copy cannot take that name.';
+      }
+      return '';
+    }
+    function check() {
+      var v = input.value.trim(), changed = v !== ds.name;
+      if (sibling) {
+        alsoText.textContent = changed && v
+          ? 'Also rename ' + sibling.name + ' to ' + v + '-eef (the copy tools/add_eef.py built for fine-tuning)'
+          : 'Also rename its -eef copy, ' + sibling.name + ', to match (the copy tools/add_eef.py built for fine-tuning)';
+      }
+      var p = changed ? problem(v) : '';
+      err.textContent = '';
+      if (p) { err.appendChild(icon('critical')); err.appendChild(document.createTextNode(p)); }
+      err.hidden = !p;
+      save.disabled = !changed || !!p;
+    }
+    input.addEventListener('input', check);
+    also.addEventListener('change', check);
+    check();
+    input.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !save.disabled) save.click(); });
+    cancel.addEventListener('click', function () { closeDialog(d); });
+    save.addEventListener('click', function () {
+      var v = input.value.trim(), withEef = !!(sibling && also.checked), here = routeNow();
+      closeDialog(d);
+      renameDataset(ds, v, withEef ? sibling : null, here);
+    });
+    input.focus(); input.select();
+    return d;
+  }
+
+  function renameDataset(ds, name, sibling, here) {
+    return act('/api/rename-dataset', { dataset: ds.name, to: name, with_eef: !!sibling }).then(function (res) {
+      return finish(null, res, function () {
+        var ep = here.ep === null ? undefined : here.ep;
+        if (here.name === ds.name) return link(name, ep);
+        if (sibling && here.name === sibling.name) return link(name + '-eef', ep);
+        return null;
+      });
+    });
+  }
+
+  // Delete several ticked episodes: the exact numbers, what is renumbered, and a tick before the button works.
+  function askDeleteEpisodes(ds, mine, sel) {
+    mine = mine.slice().sort(function (a, b) { return a.index - b.index; });
+    var rest = ds.episodes.filter(function (e) { return mine.indexOf(e) < 0; });
+    var bytes = mine.reduce(function (a, e) { return a + e.bytes; }, 0);
+    var moved = rest.filter(function (e, i) { return e.index !== i; });
+    var which = spanText(mine.map(idx));
+    var lines = [h('li', {}, ['Deletes ' + plural(mine.length, 'episode') + ' (' + which + '): their data files and ' + plural(mine.length * ds.cameras.length, 'video file') + ' (' + fmtSize(bytes) + ').'])];
+    if (!rest.length) lines.push(h('li', {}, ['That is every episode, so the dataset is left with none.']));
+    else if (moved.length) lines.push(h('li', {}, ['Renumbers the ' + plural(moved.length, 'remaining episode') + ': ' + spanText(moved.map(idx)) + ' become ' + spanText(moved.map(function (e) { return rest.indexOf(e); })) + '.']));
+    var emptied = [];
+    mine.forEach(function (e) {
+      if (emptied.indexOf(e.task) < 0 && !rest.some(function (r) { return r.task === e.task; })) emptied.push(e.task);
+    });
+    emptied.forEach(function (t) {
+      lines.push(h('li', {}, ['The task “' + t + '” is left with no episodes. It stays listed in meta/tasks.jsonl; the Tasks card can delete it.']));
+    });
+    var elsewhere = {};
+    mine.forEach(function (e) { e.twins.forEach(function (t) { (elsewhere[t.dataset] = elsewhere[t.dataset] || []).push(e.index); }); });
+    Object.keys(elsewhere).forEach(function (name) {
+      var n = elsewhere[name].length;
+      lines.push(h('li', {}, [(n === 1 ? 'Episode ' : 'Episodes ') + spanText(elsewhere[name]) + (n === 1 ? ' is' : ' are') + ' also stored in ' + name + '. Those copies stay.']));
+    });
+    if (ds.robot === 'metal' || ds.robot === 'maker') {
+      lines.push(h('li', {}, ['Afterwards rebuild the dataset you fine-tune on: ~/dream-env/bin/python tools/add_eef.py ' + ds.path + ' --arm ' + ds.robot + ' --replace']));
+    }
+    var sure = h('input', { type: 'checkbox' }), cancel = button('Cancel');
+    var go = button('Delete ' + plural(mine.length, 'episode'), 'destroy');
+    go.disabled = true;
+    sure.addEventListener('change', function () { go.disabled = !sure.checked; });
+    var d = dialog([
+      h('h2', {}, ['Delete ' + plural(mine.length, 'episode') + '?']),
+      h('p', { class: 'muted' }, [ds.name + ' · episodes ' + which]),
+      h('ul', {}, lines),
+      h('label', { class: 'chk' }, [sure, h('span', {}, ['Yes, delete episodes ' + which])]),
+      h('p', {}, [h('b', {}, ['This cannot be undone.'])]),
+      h('p', { class: 'muted' }, ['Refused while a recorder (dhk-collect or mirror_collect.py) is writing into this folder.']),
+      h('div', { class: 'actions' }, [cancel, go])
+    ]);
+    cancel.addEventListener('click', function () { closeDialog(d); });
+    go.addEventListener('click', function () {
+      go.disabled = true;
+      act('/api/delete-episodes', { dataset: ds.name, episodes: mine.map(idx) }).then(function (res) {
+        return finish(d, res, function () {
+          var at = rest.indexOf(sel);   // where the episode on screen is after the others are gone and the rest renumbered
+          if (at < 0) at = 0;
+          return rest.length ? link(ds.name, at) : link(ds.name);
+        });
+      });
+    });
+    cancel.focus();
+    return d;
+  }
+
+  // Delete a task from the first view. A task is shared by every folder that holds it, so it goes from all of them,
+  // with its episodes: the dialog breaks that down per folder and the button waits for a tick.
+  function askDeleteTaskEverywhere(task) {
+    var holders = DATA.datasets.map(function (ds) {
+      var mine = ds.episodes.filter(function (e) { return e.task === task; });
+      var rest = ds.episodes.filter(function (e) { return e.task !== task; });
+      return {
+        ds: ds, mine: mine, rest: rest, bytes: mine.reduce(function (a, e) { return a + e.bytes; }, 0),
+        moved: rest.filter(function (e, i) { return e.index !== i; })
+      };
+    }).filter(function (p) { return p.mine.length; });
+    var total = holders.reduce(function (a, p) { return a + p.mine.length; }, 0);
+    var bytes = holders.reduce(function (a, p) { return a + p.bytes; }, 0);
+    var held = holders.map(function (p) { return p.ds.name; });
+    var lines = holders.map(function (p) {
+      var then = !p.rest.length ? '; leaves it with no episodes'
+        : p.moved.length ? '; renumbers ' + spanText(p.moved.map(idx)) + ' to ' + spanText(p.moved.map(function (e) { return p.rest.indexOf(e); })) : '';
+      return h('li', {}, [h('b', {}, [p.ds.name]), ' deletes ' + plural(p.mine.length, 'episode') + ' (' + spanText(p.mine.map(idx)) + ', ' + fmtSize(p.bytes) + ')' + then + '.']);
+    });
+    var pairs = {};
+    holders.forEach(function (p) {
+      p.mine.forEach(function (e) {
+        e.twins.forEach(function (t) {
+          if (held.indexOf(t.dataset) >= 0) return;
+          var k = p.ds.name + '|' + t.dataset;
+          (pairs[k] = pairs[k] || { from: p.ds.name, to: t.dataset, eps: [] }).eps.push(e.index);
+        });
+      });
+    });
+    Object.keys(pairs).forEach(function (k) {
+      var q = pairs[k], one = q.eps.length === 1;
+      lines.push(h('li', {}, [(one ? 'Episode ' : 'Episodes ') + spanText(q.eps) + ' of ' + q.from + (one ? ' is' : ' are') + ' also stored in ' + q.to + '. Those copies stay.']));
+    });
+    var fine = holders.filter(function (p) { return p.ds.robot === 'metal' || p.ds.robot === 'maker'; });
+    if (fine.length) {
+      lines.push(h('li', {}, ['Afterwards rebuild the datasets you fine-tune on with ~/dream-env/bin/python tools/add_eef.py <folder> --arm ' + fine[0].ds.robot + ' --replace, for: ' + fine.map(function (p) { return p.ds.name; }).join(', ') + '.']));
+    }
+    var sure = h('input', { type: 'checkbox' }), cancel = button('Cancel');
+    var go = button('Delete task and ' + plural(total, 'episode'), 'destroy');
+    go.disabled = true;
+    sure.addEventListener('change', function () { go.disabled = !sure.checked; });
+    var d = dialog([
+      h('h2', {}, ['Delete the task “' + (task || 'no task') + '”?']),
+      h('p', { class: 'muted' }, ['An episode cannot be left without a task, so its episodes go with it, in every dataset that holds it: ' + plural(total, 'episode') + ' in ' + plural(holders.length, 'dataset') + ' (' + fmtSize(bytes) + ').']),
+      h('ul', {}, lines),
+      h('label', { class: 'chk' }, [sure, h('span', {}, ['Yes, delete these ' + plural(total, 'episode') + ' in ' + plural(holders.length, 'dataset') + ' along with the task'])]),
+      h('p', {}, [h('b', {}, ['This cannot be undone.'])]),
+      h('p', { class: 'muted' }, ['To delete it from one dataset only, use the Tasks card on that dataset’s page. Refused while a recorder (dhk-collect or mirror_collect.py) is writing into any of these folders.']),
+      h('div', { class: 'actions' }, [cancel, go])
+    ]);
+    cancel.addEventListener('click', function () { closeDialog(d); });
+    go.addEventListener('click', function () {
+      go.disabled = true;
+      act('/api/delete-task', { task: task }).then(function (res) { return finish(d, res); });
+    });
+    cancel.focus();
+    return d;
+  }
+
+  function delTaskBtn(task) {
+    var blocked = busyHolders(task);
+    var b = button('Delete task…', 'danger sm', function () { askDeleteTaskEverywhere(task); });
+    b.setAttribute('data-delete-task', task);
+    if (blocked.length) { b.disabled = true; b.title = busyTitle(blocked[0]); }
+    b.style.marginLeft = 'auto';
+    return b;
+  }
+
+  // An arm that never moves in an episode. The badge is an amber triangle with a white ring and a dark mark, so it
+  // shows on every task colour, the amber one included; the label and the tooltip say it in words.
+  function stillArms(e) { return e.still || []; }
+  function stillText(arms) { return (arms.length > 1 ? arms.join(' and ') + ' arms' : arms[0] + ' arm') + ' still'; }
+  function warnBadge(label) {
+    var NS = 'http://www.w3.org/2000/svg';
+    function el(tag, attrs) {
+      var n = document.createElementNS(NS, tag);
+      Object.keys(attrs).forEach(function (k) { n.setAttribute(k, attrs[k]); });
+      return n;
+    }
+    var svg = el('svg', { viewBox: '-2 -1 28 27', width: '16', height: '16', role: 'img', 'aria-label': label, class: 'wn' });
+    svg.appendChild(el('path', { d: 'M12 3 L22.5 21 H1.5 Z', fill: '#fab219', stroke: '#fff', 'stroke-width': '4', 'stroke-linejoin': 'round', 'paint-order': 'stroke' }));
+    svg.appendChild(el('path', { d: 'M12 9.5 V15', stroke: '#0b0b0b', 'stroke-width': '2.4', 'stroke-linecap': 'round' }));
+    svg.appendChild(el('circle', { cx: '12', cy: '18.3', r: '1.4', fill: '#0b0b0b' }));
+    return svg;
+  }
+  // The row's own line: how many of this task's episodes in the folder have a still arm.
+  function stillNote(p) {
+    var arms = [];
+    var n = p.eps.filter(function (e) {
+      stillArms(e).forEach(function (a) { if (arms.indexOf(a) < 0) arms.push(a); });
+      return stillArms(e).length > 0;
+    }).length;
+    if (!n) return null;
+    return h('span', { class: 'stillnote' }, [icon('warning'), stillText(arms) + ' in ' + (n === p.eps.length ? (n === 1 ? 'its episode' : 'all ' + n) : n + ' of ' + p.eps.length)]);
+  }
+
+  function clockText(s) {
+    s = Math.round(s);
+    var hh = Math.floor(s / 3600), mm = Math.floor((s % 3600) / 60), ss = s % 60;
+    return (hh ? hh + ':' + (mm < 10 ? '0' : '') + mm : String(mm)) + ':' + (ss < 10 ? '0' : '') + ss;
+  }
+  function ticksFor(longest) {
+    var steps = [10, 15, 30, 60, 120, 300, 600, 1800, 3600], step = 7200, ticks = [];
+    for (var i = 0; i < steps.length; i++) { if (longest / steps[i] <= 6) { step = steps[i]; break; } }
+    var end = Math.max(step, Math.ceil(longest / step) * step);
+    for (var t = 0; t <= end; t += step) ticks.push(t);
+    return { ticks: ticks, end: end };
+  }
+
+  // ---- landing page: every task, then the folders that hold its episodes
+  function home() {
+    var S = DATA.summary, page = h('div', { style: 'display:grid;grid-template-columns:minmax(0,1fr);gap:16px;min-width:0' });
+    page.appendChild(h('header', { class: 'top bar' }, [
+      h('div', {}, [h('h1', {}, ['Hackathon data']), h('p', { class: 'muted' }, [h('code', {}, [DATA.root]), ' · scanned ' + DATA.scanned])]),
+      button('Rescan', '', function () { reload(); })
+    ]));
+    function stat(v, label) { return h('span', {}, [h('b', {}, [String(v)]), label]); }
+    var tasks = Object.keys(DATA.slots);
+    page.appendChild(h('div', { class: 'card summary' }, [
+      stat(tasks.length, tasks.length === 1 ? 'task' : 'tasks'), stat(S.episodes, 'episodes'), stat(S.recorded, 'recorded'),
+      stat(S.datasets, 'datasets'), stat(S.onDisk, 'on disk'), stat(S.toCheck, 'to check')
+    ]));
+
+    // Every task, and under it each dataset folder that holds its episodes, all to one time scale.
+    var groups = tasks.map(function (task) {
+      var parts = DATA.datasets.map(function (ds) {
+        var eps = ds.episodes.filter(function (e) { return e.task === task; });
+        return { ds: ds, eps: eps, seconds: eps.reduce(function (a, e) { return a + e.frames / ds.fps; }, 0) };
+      }).filter(function (p) { return p.eps.length; });
+      return { task: task, slot: DATA.slots[task], parts: parts };
+    });
+    var longest = 1;
+    groups.forEach(function (g) { g.parts.forEach(function (p) { longest = Math.max(longest, p.seconds); }); });
+    var scale = ticksFor(longest);
+    var view = h('div', { class: 'tasksview' });
+    groups.forEach(function (g) {
+      var n = 0, secs = 0;
+      g.parts.forEach(function (p) { n += p.eps.length; secs += p.seconds; });
+      view.appendChild(h('div', { class: 'taskhead', 'data-task': g.task }, [
+        h('span', { class: 'sw s' + g.slot }), taskName(g.task),
+        h('span', { class: 'muted' }, [plural(n, 'episode') + ' · ' + fmtDur(secs) + ' · in ' + plural(g.parts.length, 'dataset')]),
+        delTaskBtn(g.task)
+      ]));
+      g.parts.forEach(function (p) {
+        // One row, one click target: the folder link is stretched over the whole row, the blocks sit above it and
+        // open their own episode. The row opens the folder at the first episode of this task.
+        var first = p.eps[0];
+        view.appendChild(h('div', { class: 'folderrow', title: 'Open ' + p.ds.name + ': ' + plural(p.eps.length, 'episode') + ' of this task (' + spanText(p.eps.map(idx)) + ')' }, [
+          h('div', { class: 'sub' }, [
+            h('a', { class: 'folder', href: link(p.ds.name, first.index) }, [p.ds.name]),
+            h('span', { class: 'muted' }, [' · ' + plural(p.eps.length, 'episode') + ' · ' + fmtDur(p.seconds)]),
+            stillNote(p)
+          ]),
+          h('div', { class: 'strip', style: 'width:' + (p.seconds / scale.end * 100).toFixed(2) + '%' }, p.eps.map(function (e) {
+            var length = e.frames / p.ds.fps;
+            var arms = stillArms(e), wide = length / scale.end >= 0.04;
+            return h('a', { class: 'blk s' + g.slot, style: 'flex:' + e.frames, href: link(p.ds.name, e.index), title: p.ds.name + ' · episode ' + e.index + ' · ' + e.clock + ' · ' + (g.task || 'no task') + (arms.length ? ' · ▲ ' + stillText(arms) : '') }, [length / scale.end >= 0.02 ? String(e.index) : null, arms.length && wide ? warnBadge(stillText(arms)) : null]);
+          }))
+        ]));
+      });
+    });
+    view.appendChild(h('div', { class: 'axis' }, scale.ticks.map(function (t) { return h('span', { style: 'left:' + (t / scale.end * 100).toFixed(2) + '%' }, [clockText(t)]); })));
+    page.appendChild(h('section', { class: 'card' }, [
+      h('h2', {}, ['Every task, to one time scale']),
+      h('p', { class: 'muted lead' }, ['Each task, then the dataset folders that hold its episodes: one block per episode, as wide as it is long. Click a block to watch that episode, a whole folder row to open its data, or ✎ to rename the task.']),
+      tasks.length ? view : h('p', { class: 'muted' }, ['No episodes yet.'])
+    ]));
+
+    var needs = DATA.attention.map(function (a) {
+      return h('li', {}, [icon(a.level === 'problem' ? 'critical' : 'warning'), h('span', {}, [h('a', { href: link(a.dataset) }, [h('b', {}, [a.dataset])]), ' · ' + a.text])]);
+    });
+    var repeats = DATA.overlaps.map(function (o) {
+      return h('li', {}, [icon('info'), h('span', {}, [
+        h('a', { href: link(o.a) }, [h('b', {}, [o.a])]), ' ' + o.aEps + ' ↔ ', h('a', { href: link(o.b) }, [h('b', {}, [o.b])]),
+        ' ' + o.bEps + ' · ' + o.kind + (o.size ? ' · ' + o.size + ' stored twice' : '')
+      ])]);
+    });
+    page.appendChild(h('div', { class: 'cols' }, [
+      h('section', { class: 'card' }, [h('h2', {}, ['Needs a look']), h('ul', { class: 'items' }, needs.length ? needs : [h('li', { class: 'muted' }, ['Nothing.'])])]),
+      h('section', { class: 'card' }, [h('h2', {}, ['Stored more than once']), h('ul', { class: 'items' }, repeats.length ? repeats : [h('li', { class: 'muted' }, ['Nothing.'])])])
+    ]));
+
+    // The dataset folders themselves: their state, their notes, and the pencil that renames them.
+    var frows = DATA.datasets.map(function (ds) {
+      return h('tr', {}, [
+        h('th', { scope: 'row' }, [h('span', { class: 'dsname' }, [h('a', { class: 'rowlink', href: link(ds.name) }, [ds.name]), pencilDs(ds)])]),
+        h('td', {}, [String(ds.episodes.length)]), h('td', {}, [String(ds.tasks.length)]), h('td', {}, [ds.dur]),
+        h('td', {}, [ds.size]), h('td', {}, [ds.when]), h('td', {}, [chip(ds)]),
+        h('td', {}, [h('div', { class: 'pills' }, ds.pills.map(function (p) { return h('span', { class: 'pill' }, [icon(p.kind), p.text]); }))])
+      ]);
+    });
+    page.appendChild(h('section', { class: 'card folders' }, [
+      h('h2', {}, ['Datasets']),
+      h('p', { class: 'muted lead' }, ['The folders in ' + DATA.rootShort + '. Click a row to see its episodes; ✎ renames it.']),
+      h('div', { class: 'scroll' }, [h('table', {}, [
+        h('thead', {}, [h('tr', {}, ['Dataset', 'Episodes', 'Tasks', 'Time', 'Size', 'Last written', 'Status', 'Notes'].map(function (t) { return h('th', {}, [t]); }))]),
+        h('tbody', {}, frows)])])
+    ]));
+    return page;
+  }
+
+  // ---- dataset page: notes, a player for the selected episode, the episodes
+  // Says what is on screen, above the videos.
+  function previewNote(ds, ep) {
+    var c = ds.cameras[0];
+    if (ep.missing.length === ds.cameras.length) return h('p', { class: 'previewnote' }, [icon('warning'), 'No video files were found for this episode.']);
+    return h('p', { class: 'previewnote' }, [icon('info'),
+      'The saved recording, in full: ' + (c ? c.w + '×' + c.h + ', ' : '') + ds.fps + ' fps. The cameras themselves may capture more; the recorder shrinks each frame to this size before saving it.']);
+  }
+
+  function player(ds, ep) {
+    var pos = ds.episodes.indexOf(ep), prev = ds.episodes[pos - 1], next = ds.episodes[pos + 1];
+    var figures = ds.cameras.map(function (c) {
+      var media = ep.missing.indexOf(c.name) < 0
+        ? h('video', { controls: true, muted: true, playsinline: true, preload: 'metadata', src: '/video/' + encodeURIComponent(ds.name) + '/' + ep.index + '/' + c.name + '.mp4' })
+        : h('div', { class: 'novideo' }, ['This video file is missing']);
+      return h('figure', {}, [media, h('figcaption', {}, [c.name + ' · recorded at ' + c.w + '×' + c.h])]);
+    });
+    function step(e, text, rel) {
+      return e ? h('a', { class: 'step', rel: rel, href: link(ds.name, e.index) }, [text]) : h('span', { class: 'step off' }, [text]);
+    }
+    var toggle = button('Play'), restart = button('Restart');
+    var rate = h('select', {}, [['0.5', '0.5×'], ['1', '1×'], ['2', '2×'], ['4', '4×']].map(function (o) { return h('option', { value: o[0], selected: o[0] === '1' }, [o[1]]); }));
+    var rename = button('Rename…', '', function () { askRename(ds, ep); });
+    var del = button('Delete…', 'danger', function () { askDelete(ds, ep); });
+    rename.id = 'rename'; del.id = 'delete';
+    if (busy(ds)) { rename.disabled = del.disabled = true; rename.title = del.title = busyTitle(ds); }
+    var card = h('section', { class: 'card', id: 'player' }, [
+      h('header', {}, [
+        h('div', {}, [h('h2', {}, ['Episode ' + ep.index]), h('p', { class: 'tasktitle', 'data-tasktitle': ep.task }, [h('span', { class: 'sw s' + ep.slot }), taskName(ep.task)]), h('p', { class: 'muted' }, [ds.name + ' · ' + ep.clock + ' · ' + ep.frames.toLocaleString() + ' frames']), stillArms(ep).length ? h('p', { class: 'stillbar' }, [icon('warning'), 'The ' + (stillArms(ep).length > 1 ? stillArms(ep).join(' and ') + ' arms do' : stillArms(ep)[0] + ' arm does') + ' not move in this episode (action and state are constant).']) : null]),
+        h('div', { class: 'steps' }, [step(prev, '← Previous', 'prev'), step(next, 'Next →', 'next'), h('span', { class: 'sep' }), rename, del])
+      ]),
+      previewNote(ds, ep),
+      h('div', { class: 'vids' }, figures),
+      h('div', { class: 'controls' }, [toggle, restart, h('label', {}, ['Speed ', rate]), h('span', { class: 'muted' }, ['The cameras play together; seeking one seeks all.'])]),
+    ]);
+    var vs = [].slice.call(card.querySelectorAll('video'));
+    function go(v) { var p = v.play(); if (p && p.catch) p.catch(function () {}); }
+    function label() { if (vs.length) toggle.textContent = vs[0].paused ? 'Play' : 'Pause'; }
+    vs.forEach(function (v) {
+      v.addEventListener('play', function () { vs.forEach(function (o) { if (o !== v && o.paused) go(o); }); label(); });
+      v.addEventListener('pause', function () { vs.forEach(function (o) { if (o !== v && !o.paused) o.pause(); }); label(); });
+      v.addEventListener('seeked', function () { vs.forEach(function (o) { if (o !== v && Math.abs(o.currentTime - v.currentTime) > 0.05) o.currentTime = v.currentTime; }); });
+    });
+    toggle.addEventListener('click', function () { var play = vs[0] && vs[0].paused; vs.forEach(function (v) { if (play) go(v); else v.pause(); }); });
+    restart.addEventListener('click', function () { vs.forEach(function (v) { v.currentTime = 0; }); });
+    rate.addEventListener('change', function () { vs.forEach(function (v) { v.playbackRate = parseFloat(rate.value); }); });
+    return card;
+  }
+
+  function tasksCard(ds, sel) {
+    function row(task, slot, unused) {
+      var mine = ds.episodes.filter(function (e) { return e.task === task; });
+      var secs = mine.reduce(function (a, e) { return a + e.frames / ds.fps; }, 0);
+      var b = button('Delete task…', 'danger', function () { askDeleteTask(ds, task, sel); });
+      b.setAttribute('data-task', task);
+      if (busy(ds)) { b.disabled = true; b.title = busyTitle(ds); }
+      return h('tr', {}, [
+        h('td', {}, [unused ? h('span', { class: 'swh' }) : h('span', { class: 'sw s' + slot, style: 'display:inline-block;margin-right:8px' }), task || 'no task', unused ? h('span', { class: 'muted' }, [' · not used by any episode']) : null]),
+        h('td', {}, [unused ? '—' : plural(mine.length, 'episode') + ' (' + spanText(mine.map(idx)) + ')']),
+        h('td', {}, [unused ? '—' : fmtDur(secs)]),
+        h('td', { class: 'act' }, [b])
+      ]);
+    }
+    var rows = ds.tasks.map(function (t) { return row(t.task, t.slot, false); })
+      .concat((ds.unused || []).map(function (t) { return row(t, 0, true); }));
+    if (!rows.length) return null;
+    return h('section', { class: 'card tasks' }, [
+      h('h2', {}, ['Tasks']),
+      h('p', { class: 'muted lead' }, ['A task is the sentence its episodes are trained to follow. Deleting a task deletes the episodes that use it.']),
+      h('div', { class: 'scroll' }, [h('table', {}, [
+        h('thead', {}, [h('tr', {}, ['Task', 'Episodes', 'Time', ''].map(function (t) { return h('th', {}, [t]); }))]),
+        h('tbody', {}, rows)])])
+    ]);
+  }
+
+  function dataset(ds, epIndex) {
+    var ep = ds.episodes.filter(function (e) { return e.index === epIndex; })[0] || ds.episodes[0];
+    var rail = h('nav', { class: 'rail' }, [h('h4', {}, ['Datasets'])].concat(DATA.datasets.map(function (o) {
+      return h('a', { class: 'item' + (o === ds ? ' on' : ''), href: link(o.name) }, [icon(statusKind(o)), h('b', {}, [o.name]), h('span', { class: 'muted' }, [o.railSummary])]);
+    })));
+    function fact(label, value) { return h('div', {}, [h('span', {}, [label]), h('b', {}, [value])]); }
+    var cams = ds.cameras.map(function (c) { return c.name + ' ' + c.w + '×' + c.h; }).join(', ');
+    var kinds = { problem: 'critical', check: 'warning', note: 'info' };
+    var notes = ds.notes.length
+      ? h('ul', { class: 'notes' }, ds.notes.map(function (n) { return h('li', {}, [icon(kinds[n.level]), n.text]); }))
+      : h('p', { class: 'muted' }, ['Every file the metadata lists is present and agrees with it.']);
+    var about = h('section', { class: 'card' }, [
+      h('header', {}, [h('h2', {}, [ds.name]), chip(ds)]),
+      h('div', { class: 'facts' }, [fact('Robot', ds.robot), fact('Frame rate', ds.fps + ' fps'), fact('Cameras', cams), fact('Size', ds.size), fact('Last written', ds.when)]),
+      h('p', { class: 'muted' }, [h('code', {}, [ds.path])]),
+      busy(ds) ? h('p', { class: 'recbar' }, [h('span', { class: 'recdot', 'aria-hidden': 'true' }), ds.recording + ' is writing into this folder now: editing is off, and the numbers below grow as episodes are saved.']) : null,
+      h('div', { class: 'gap' }), notes
+    ]);
+    var parts = [about];
+    if (!ep) {
+      parts.push(h('section', { class: 'card muted' }, ['This dataset has no episodes.']));
+      parts.push(tasksCard(ds, null));
+    } else {
+      var chosen = pickedFor(ds), boxes = [];
+      var allBox = h('input', { type: 'checkbox', 'aria-label': 'Select every episode' });
+      var count = h('span', { class: 'muted' });
+      var delSel = button('Delete selected…', 'danger');
+      delSel.id = 'delete-selected';
+      function syncPick() {
+        var n = chosen.length;
+        if (busy(ds)) { delSel.disabled = true; delSel.title = busyTitle(ds); count.textContent = 'Editing is off while a recorder writes into this folder.'; return; }
+        count.textContent = n ? plural(n, 'episode') + ' selected: ' + spanText(chosen.map(idx)) : 'Tick episodes to delete one or several.';
+        delSel.disabled = !n;
+        allBox.checked = n > 0 && n === ds.episodes.length;
+        allBox.indeterminate = n > 0 && n < ds.episodes.length;
+      }
+      function pickCell(e) {
+        var b = h('input', { type: 'checkbox', 'aria-label': 'Select episode ' + e.index, 'data-ep': String(e.index) });
+        b.checked = chosen.indexOf(e) >= 0;
+        b.addEventListener('change', function () {
+          var at = chosen.indexOf(e);
+          if (b.checked && at < 0) chosen.push(e);
+          if (!b.checked && at >= 0) chosen.splice(at, 1);
+          syncPick();
+        });
+        boxes.push(b);
+        return h('td', { class: 'sel' }, [b]);
+      }
+      allBox.addEventListener('change', function () {
+        chosen.length = 0;
+        if (allBox.checked) ds.episodes.forEach(function (e) { chosen.push(e); });
+        boxes.forEach(function (b) { b.checked = allBox.checked; });
+        syncPick();
+      });
+      delSel.addEventListener('click', function () {
+        if (chosen.length === 1) askDelete(ds, chosen[0]);
+        else askDeleteEpisodes(ds, chosen, ep);
+      });
+      var rows = ds.episodes.map(function (e) {
+        var flags = [];
+        if (stillArms(e).length) flags.push(h('span', { class: 'chip' }, [icon('warning'), stillText(stillArms(e))]));
+        if (e.mirrored) flags.push(h('span', { class: 'muted' }, [(flags.length ? ' · ' : '') + 'mirrored']));
+        return h('tr', { 'aria-current': e === ep ? 'true' : null }, [
+          pickCell(e),
+          h('td', {}, [h('a', { class: 'rowlink', href: link(ds.name, e.index) }, [String(e.index)])]),
+          h('td', {}, [h('span', { class: 'sw s' + e.slot, style: 'display:inline-block;margin-right:8px' }), e.task || 'no task']),
+          h('td', {}, [h('span', { class: 'lbw' }, [h('span', { class: 'lb s' + e.slot, style: 'width:' + e.barPct.toFixed(1) + '%' })]), e.clock]),
+          h('td', {}, [e.size]), h('td', {}, [e.when]), h('td', {}, flags)
+        ]);
+      });
+      syncPick();
+      parts.push(player(ds, ep));
+      parts.push(tasksCard(ds, ep));
+      parts.push(h('section', { class: 'card' }, [
+        h('h2', {}, ['Episodes']), h('p', { class: 'muted lead' }, ['Click a row to watch that episode above. Tick episodes to delete them.']),
+        h('div', { class: 'tablebar' }, [delSel, count]),
+        h('div', { class: 'scroll' }, [h('table', { class: 'episodes' }, [
+          h('thead', {}, [h('tr', {}, [h('th', { class: 'sel' }, [allBox])].concat(['#', 'Task', 'Length', 'Size', 'Written', 'Flags'].map(function (t) { return h('th', {}, [t]); })))]),
+          h('tbody', {}, rows)])])
+      ]));
+    }
+    parts = parts.filter(Boolean);
+    return h('div', { style: 'display:grid;grid-template-columns:minmax(0,1fr);gap:16px;min-width:0' }, [
+      h('header', { class: 'top bar' }, [h('div', {}, [h('p', { class: 'crumbs' }, [h('a', { href: '#/' }, ['← All datasets'])]), h('h1', { class: 'dsname' }, [ds.name, pencilDs(ds)])]), button('Rescan', '', function () { reload(); })]),
+      h('div', { class: 'shell' }, [rail, h('div', { class: 'main' }, parts)])
+    ]);
+  }
+
+  // ---- routing: #/ or #/d/<dataset>[/<episode>]
+  function render() {
+    var m = location.hash.match(/^#\/d\/([^\/]+)(?:\/(\d+))?$/);
+    var name = m ? decodeURIComponent(m[1]) : null, ep = m && m[2] !== undefined ? parseInt(m[2], 10) : null;
+    var ds = name ? find(name) : null;
+    app.textContent = '';
+    app.appendChild(name ? (ds ? dataset(ds, ep) : h('p', { class: 'card muted' }, ['No dataset called ' + name + '.'])) : home());
+    document.title = (ds ? ds.name + ' · ' : '') + 'Hackathon data';
+    var target = ep !== null && document.getElementById('player');
+    if (holdScroll) holdScroll = false;
+    else if (target) target.scrollIntoView({ block: 'start' });
+    else window.scrollTo(0, 0);
+  }
+  document.addEventListener('keydown', function (e) {
+    if (e.target !== document.body || e.altKey || e.ctrlKey || e.metaKey) return;
+    var a = document.querySelector(e.key === 'ArrowLeft' ? 'a[rel=prev]' : e.key === 'ArrowRight' ? 'a[rel=next]' : 'none');
+    if (a) location.hash = a.getAttribute('href');
+  });
+  window.addEventListener('hashchange', render);
+  // While a recorder writes, the page follows it, unless that would disturb what the person is doing.
+  function quiet() {
+    if (document.hidden || document.querySelector('dialog[open], .editor, .episodes tbody input:checked')) return false;
+    return [].slice.call(document.querySelectorAll('video')).every(function (v) { return v.paused; });
+  }
+  setInterval(function () {
+    if (!DATA || !DATA.datasets.some(busy) || !quiet()) return;
+    load().then(function () { holdScroll = true; render(); }, function () {});
+  }, 15000);
+  function failed(e) {
+    app.textContent = '';
+    app.appendChild(h('p', { class: 'card muted' }, ['Could not load the data: ' + e.message + '. Is the server still running?']));
+  }
+  // The server puts the first scan in the page, so it draws at once; the page asks again only to rescan.
+  var first = false;
+  try { DATA = JSON.parse(document.getElementById('boot').textContent); prepare(); first = true; } catch (e) {}
+  if (first) render(); else load().then(render, failed);
+})();
+</script>
+</body>
+</html>
