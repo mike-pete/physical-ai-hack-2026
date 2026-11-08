@@ -189,6 +189,7 @@ class DeviceSet:
         *,
         sim: bool = False,
         quest_ip: str | None = None,
+        use_quest: bool = True,
         open_quest: Callable[[str | None], Any] = quest.Quest,
         open_camera: Callable[[config.CameraConfig, int, int], Any] = cameras.Camera,
         adb_devices: Callable[[], str] = quest.adb_devices,
@@ -201,12 +202,14 @@ class DeviceSet:
         @param station The station config.
         @param sim A simulated YAM: no cameras or arm links to check.
         @param quest_ip The Quest's address for adb over Wi-Fi, or None for USB.
+        @param use_quest False for a session that needs no Quest (a scripted policy): it is neither opened nor listed.
         @param open_quest, open_camera, adb_devices, headset_state, run, sys_net The real ones by default; tests pass
             fakes.
         """
         self._station = station
         self._sim = sim
         self._quest_ip = quest_ip
+        self._use_quest = use_quest
         self._open_quest = open_quest
         self._open_camera = open_camera
         self._adb_devices = adb_devices
@@ -225,7 +228,7 @@ class DeviceSet:
         It can take a few seconds (a camera waits up to two for its first frame), so call it outside the control loop.
         """
         with self._quest_lock:
-            if self.headset is None:
+            if self.headset is None and self._use_quest:
                 problem = None if self._quest_ip else quest_problem(self._adb_devices())
                 if problem is None:
                     try:
@@ -253,7 +256,7 @@ class DeviceSet:
 
     def statuses(self) -> list[Status]:
         """Every device's state now; opens nothing, so it can run every second, during a session too."""
-        found = [self._quest_status()]
+        found = [self._quest_status()] if self._use_quest else []
         if self._sim:
             return found
         for cfg in self._station.cameras:

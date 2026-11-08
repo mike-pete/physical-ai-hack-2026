@@ -13,7 +13,8 @@ arm's clutch and tool position, warnings, the session's events, and the dataset'
 back. Its actions, which only `dhk-collect` offers: devices' fixes (devices.DeviceSet.apply_fix(): bring a CAN link up
 when it is down, restart the Quest's app when its data stops, restart adb before the Quest is open), setting the task
 text the next episodes record, and deleting chosen episodes (refused while one records; the later ones are
-renumbered). Nothing on it drives the arms. An action is taken only from the page itself (a custom header, and an
+renumbered). Teleop is never driven from it; a scripted policy session (`dhk-collect --policy graph`) adds Start
+and Stop buttons for its run, after the arms were opened from the terminal. An action is taken only from the page itself (a custom header, and an
 `Origin` that matches the page's address), so no other website open in the same browser can send one through the SSH
 tunnel. `scripts/check_cameras.py` serves the same page with the
 cameras alone.
@@ -64,6 +65,7 @@ class Dashboard:
         on_task: Callable[[str], tuple[bool, str]] | None = None,
         on_delete: Callable[[list[int]], tuple[bool, str]] | None = None,
         task_of: Callable[[], str] | None = None,
+        on_policy: Callable[[str], tuple[bool, str]] | None = None,
     ) -> None:
         """Starts serving.
 
@@ -77,6 +79,7 @@ class Dashboard:
         @param on_task Sets the task text the next episodes record; None offers no task box.
         @param on_delete Deletes episodes by number; None offers no delete.
         @param task_of The task text the next episode records, for the page.
+        @param on_policy Starts (`start`) or stops (`stop`) a scripted policy run; None offers no policy buttons.
         @throws OSError The port is taken.
         """
         self._frame = frame
@@ -87,6 +90,7 @@ class Dashboard:
         self._on_task = on_task
         self._on_delete = on_delete
         self._task_of = task_of
+        self._on_policy = on_policy
         self._lock = threading.Lock()
         self._snapshot: dict[str, Any] = {}
         self._devices: list[dict[str, Any]] = []
@@ -140,6 +144,7 @@ class Dashboard:
                 "task": self._task_of() if self._task_of else None,
                 "can_set_task": self._on_task is not None,
                 "can_delete": self._on_delete is not None and self._dataset_root is not None,
+                "can_drive_policy": self._on_policy is not None,
                 "events": list(self._events),
             }
 
@@ -197,6 +202,7 @@ def _handler_for(board: Dashboard) -> type[http.server.BaseHTTPRequestHandler]:
                 "/api/fix": board._on_fix,
                 "/api/task": board._on_task,
                 "/api/episodes/delete": board._on_delete,
+                "/api/policy": board._on_policy,
             }
             action = actions.get(path)
             if action is None:
@@ -215,6 +221,10 @@ def _handler_for(board: Dashboard) -> type[http.server.BaseHTTPRequestHandler]:
                     ok, message = action(str(body.get("fix", "")))
                 elif path == "/api/task":
                     ok, message = action(str(body.get("task", "")))
+                elif path == "/api/policy":
+                    if body.get("action") not in ("start", "stop"):
+                        raise ValueError("action must be start or stop")
+                    ok, message = action(body["action"])
                 else:
                     episodes = body.get("episodes")
                     if not isinstance(episodes, list) or not all(
@@ -326,7 +336,7 @@ PAGE = """<!doctype html>
   #banner { display: none; margin-bottom: 12px; padding: 12px 14px; border-radius: 10px; font-weight: 600;
             border: 1px solid var(--line); background: var(--panel); }
   #banner.waiting { display: block; border-color: var(--warn); color: var(--warn); }
-  #banner.ready { display: block; border-color: var(--ok); color: var(--ok); font-size: 16px; }
+  #banner.ready, #banner.ready_enter { display: block; border-color: var(--ok); color: var(--ok); font-size: 16px; }
   #banner.opening { display: block; }
   #devices { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; margin-bottom: 12px; }
   .device { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); }
@@ -367,6 +377,14 @@ PAGE = """<!doctype html>
       <form id="taskform"><input id="taskinput" maxlength="512" placeholder="type the task, e.g. put the red cube in the bowl">
         <button class="action" type="submit">Set task</button></form>
       <div id="taskresult" class="actionresult"></div>
+    </div>
+    <div id="policybox" hidden>
+      <div>Graph policy: <b id="policystate">-</b> <span id="policydetail" class="muted"></span></div>
+      <div style="display:flex; gap:8px; margin:6px 0">
+        <button id="policystart" class="action" type="button">Start</button>
+        <button id="policystop" class="action danger" type="button">Stop (hold)</button>
+      </div>
+      <div id="policyresult" class="actionresult"></div>
     </div>
     <div id="session" class="muted">no session yet</div>
     <div class="arms" id="arms"></div>
@@ -428,6 +446,7 @@ function fmt(v) { return (v >= 0 ? "+" : "") + v.toFixed(3); }
 const BANNERS = {
   waiting: "Waiting for the devices below: fix what each red one says. The arms are not opened yet.",
   ready: "Everything is ready: press A on the right controller to open the arms.",
+  ready_enter: "Everything is ready: press Enter in the station's terminal to open the arms.",
   opening: "Opening the arms...",
 };
 const fixResults = {}, fixesRunning = new Set();
@@ -474,6 +493,15 @@ function render(status) {
   $("deletebutton").title = recordingNow ? "save (A) or discard (B) the episode first" : "";
   if (cameras.length !== status.cameras.length) buildCameras(status.cameras);
   const s = status.snapshot;
+  $("policybox").hidden = !status.can_drive_policy;
+  const pol = s.policy;
+  if (pol) {
+    $("policystate").textContent = pol.state + (pol.ghost ? " (dry run)" : "");
+    const results = Object.entries(pol.results).map(([name, r]) => `${name} ${r}`).join(", ");
+    $("policydetail").textContent = (pol.cable ? `${pol.cable} (${pol.cable_number}/${pol.cables}) try ${pol.attempt}/${pol.attempts}; ` : "") +
+      results + (pol.located ? `; ${pol.located}` : "") + (pol.reason ? `; ${pol.reason}` : "");
+    $("policystart").disabled = pol.started;
+  }
   $("mode").textContent = s.mode || (status.phase ? "starting" : "camera check");
   $("mode").className = "badge" + (s.mode === "live" ? " live" : "");
   const recording = !!s.recording;
@@ -530,6 +558,13 @@ $("taskform").addEventListener("submit", async (event) => {
   const reply = await postAction("/api/task", {task: $("taskinput").value});
   $("taskresult").textContent = reply.message;
   if (reply.ok) $("taskinput").value = "";
+});
+$("policystart").addEventListener("click", async () => {
+  if (!confirm("Start the graph policy? The arm will move. Keep a hand on the emergency stop.")) return;
+  $("policyresult").textContent = (await postAction("/api/policy", {action: "start"})).message;
+});
+$("policystop").addEventListener("click", async () => {
+  $("policyresult").textContent = (await postAction("/api/policy", {action: "stop"})).message;
 });
 $("deletebutton").addEventListener("click", async () => {
   const chosen = [...selected].sort((a, b) => a - b);

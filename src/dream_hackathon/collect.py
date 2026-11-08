@@ -5,7 +5,13 @@ uv run dhk-collect --config configs/yam.yaml --dataset-dir ~/hackathon_data/cube
 uv run dhk-collect --config configs/yam.yaml --dataset-dir ~/hackathon_data/cubes --task "put the red cube in the bowl"
 uv run dhk-collect --config configs/yam.yaml --dry-run     # read only: shows the targets, moves nothing
 uv run dhk-collect --config configs/yam.yaml --sim         # YAM: i2rt's simulated arms, blank camera frames
+uv run dhk-collect --config configs/station.yaml --policy graph --poses configs/unplug_poses.yaml [--dry-run]
 ```
+
+`--policy graph` drives one arm with the scripted unplugging policy (unplug/graph.py) instead of the Quest, which it
+does not need: Enter in the terminal opens the arms once every other device is ready, and Enter again (or Start on the
+dashboard) starts the run; Stop on the dashboard holds the arm where it is. `--record` saves one episode per cable
+unplugged. At the end, or on Ctrl+C, the arm first opens its gripper and rises straight up, then returns as below.
 
 Hold a controller's grip to drive that arm, pull its trigger to close its gripper. A starts an episode and, pressed
 again, saves it; B discards it; the right joystick click sends both arms back to where they started (not while
@@ -57,6 +63,12 @@ from dream_hackathon import (
     station_lock,
     teleop,
 )
+from dream_hackathon.unplug import graph as unplug_graph
+from dream_hackathon.unplug import motion as unplug_motion
+from dream_hackathon.unplug import params as unplug_params
+from dream_hackathon.unplug import perception as unplug_perception
+from dream_hackathon.unplug import poses as unplug_poses
+from dream_hackathon.unplug import verify as unplug_verify
 
 ## Homing and the end-of-session return move every joint at most this fast.
 HOME_SPEED_RAD_S = 0.5
@@ -91,6 +103,34 @@ A_AFTER_READY_S = 1.0
 
 ## Frames by camera role, at the recording size.
 FrameSource = Callable[[], dict[str, npt.NDArray[np.uint8]]]
+## The graph policy's params file, when it exists and --unplug-config names none.
+UNPLUG_CONFIG = pathlib.Path("configs/unplug.yaml")
+## The graph policy's viewing pose and reference row, when it exists and --view names none.
+UNPLUG_VIEW = pathlib.Path("configs/unplug_view.yaml")
+## Where the graph policy's tip-check pictures go, one folder per session.
+UNPLUG_DEBUG_DIR = pathlib.Path("~/.cache/dream_hackathon/unplug").expanduser()
+## The shutdown retreat waits this long for the gripper to open before rising.
+RETREAT_OPEN_S = 0.8
+## The shutdown retreat stops where it is when a joint falls this far behind.
+RETREAT_MAX_LAG_RAD = 0.10
+## A Quest that reports nothing: what a scripted policy's session reads instead of a headset.
+_IDLE_QUEST = quest.QuestState(
+    {"left": np.eye(4), "right": np.eye(4)}, {"left": 0.0, "right": 0.0}, {"left": 0.0, "right": 0.0}, frozenset()
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class PolicySpec:
+    """What `--policy graph` runs: the poses and parameters, which cables, and whether episodes are recorded."""
+
+    poses: pathlib.Path
+    params: pathlib.Path | None = None
+    cables: tuple[int, ...] | None = None
+    stop_after: str | None = None
+    speed_scale: float = 1.0
+    record: bool = False
+    view: pathlib.Path | None = None
+    capture_view: bool = False
 
 
 class SessionControls:
@@ -166,29 +206,38 @@ class Collector:
         station: config.StationConfig,
         task: str,
         robot: arms.Arms,
-        headset: "quest.Quest",
+        headset: "quest.Quest | None",
         frames: FrameSource,
         iks: dict[str, ik.ArmIK],
         writer: dataset.DatasetWriter,
         log: Callable[[str], None] = print,
         controls: SessionControls | None = None,
+        policy: unplug_graph.UnplugGraph | None = None,
+        record_policy: bool = False,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """Holds the devices; the command starts where the arms are.
 
         @param station The station config.
         @param task The task text recorded with each episode.
         @param robot Both arms.
-        @param headset The Quest (anything with read() returning a quest.QuestState).
+        @param headset The Quest (anything with read() returning a quest.QuestState); None with a policy.
         @param frames Returns each camera's newest frame, at the recording size.
         @param iks Per side, the teleop IK.
         @param writer The dataset episodes are saved to.
         @param log Where events are reported.
         @param controls The task and dataset the dashboard can change; None keeps `task` and `writer` as they are.
+        @param policy A scripted policy driving its one arm instead of the Quest; the other arm holds still.
+        @param record_policy Whether the policy's runs are recorded, one episode per cable.
+        @param clock The policy's time, in seconds.
         """
         self._station = station
         self._controls = controls or SessionControls(lambda: writer, task)
         self._robot = robot
         self._headset = headset
+        self._policy = policy
+        self._record_policy = record_policy
+        self._clock = clock
         self._frames = frames
         self._iks = iks
         self._log = log
@@ -210,16 +259,25 @@ class Collector:
         self._warnings: list[tuple[float, str]] = []
         self.homing = False
         self.episode: dataset.Episode | None = None
+        if policy is not None:
+            side = policy.side
+            policy.attach(joints[side], grips[side], robot.start_joints[side], ghost=not robot.energized)
 
     def tick(self) -> None:
         """One control tick: read, react to the buttons, move the command, send it, record every n-th tick."""
         measured, measured_grips = self._robot.read()
-        state = self._headset.read()
-        self._handle_buttons(state.pressed)
-        if self.homing:
-            self._step_home()
+        if self._policy is not None:
+            if self.homing:
+                self._step_home()
+            else:
+                self._drive(measured, measured_grips)
         else:
-            self._follow(state, measured)
+            state = self._headset.read() if self._headset is not None else _IDLE_QUEST
+            self._handle_buttons(state.pressed)
+            if self.homing:
+                self._step_home()
+            else:
+                self._follow(state, measured)
         if self._robot.energized:
             self._resync_lagging(measured)
             self._robot.command(self._command.joints, self._command.grips)
@@ -247,15 +305,21 @@ class Collector:
         now = time.monotonic()
         self._warnings = [(when, text) for when, text in self._warnings if now - when < WARNING_SHOWN_S]
         per_arm = {}
+        policy = self._policy
         for side in ("left", "right"):
             xyz = self._iks[side].fk(self._command.joints[side])[:3, 3]
+            if policy is not None:
+                engaged = side == policy.side and policy.started and not policy.done
+            else:
+                engaged = self._clutches[side].engaged
             per_arm[side] = {
-                "engaged": self._clutches[side].engaged,
+                "engaged": engaged,
                 "tool_m": [round(float(value), 4) for value in xyz],
                 "grip": round(float(self._command.grips[side]), 3),
             }
         frames = self.episode.frames if self.episode is not None else 0
-        return {
+        extra = {"policy": policy.status()} if policy is not None else {}
+        return extra | {
             "mode": "live" if self._robot.energized else "dry run",
             "recording": self.episode is not None,
             "frames": frames,
@@ -353,6 +417,62 @@ class Collector:
             self._command.joints[side] = solver.step(target, joints, self._dt_s)
             self._command.grips[side] = 1.0 - state.trigger[side]
 
+    def _drive(self, measured: arms.Joints, measured_grips: arms.Grips) -> None:
+        """Moves the policy's arm's command one tick along its run; the other arm holds (or, in a dry run, follows
+        the real arm, as an unclutched one does in teleop). Starts and ends the policy's episodes when recording."""
+        policy = self._policy
+        assert policy is not None
+        side = policy.side
+        joints, grip, _ = policy.act(self._clock(), measured[side], measured_grips[side])
+        self._command.joints[side] = joints
+        self._command.grips[side] = grip
+        if not self._robot.energized:
+            for other in measured:
+                if other != side:
+                    self._command.joints[other] = measured[other].copy()
+        for kind, details in policy.events():
+            if not (self._record_policy and self._robot.energized):
+                continue
+            if kind == "episode_start" and self.episode is None:
+                self._toggle_recording()
+            elif kind == "episode_end" and self.episode is not None:
+                if details.get("success"):
+                    self._toggle_recording()  # saves it
+                else:
+                    self.discard()
+
+    def retreat(self) -> None:
+        """At the end of a policy session: opens the policy arm's gripper, then lifts its tool straight up.
+
+        So the joint-space return to the start (go_home()) begins clear of the strip and the cables. It stops where
+        it is if the arm falls behind; a dry run skips it.
+        """
+        policy = self._policy
+        if policy is None or not self._robot.energized:
+            return
+        side = policy.side
+        self._command.grips[side] = 1.0
+        measured, _ = self._robot.read()
+        self._command.joints[side] = measured[side].copy()
+        end_s = time.monotonic() + RETREAT_OPEN_S
+        while time.monotonic() < end_s:
+            self._robot.command(self._command.joints, self._command.grips)
+            time.sleep(self._dt_s)
+        path = policy.retreat_path(self._robot.read()[0][side])
+        if path is None:
+            return
+        for joints in path.points:
+            started_s = time.perf_counter()
+            measured, _ = self._robot.read()
+            if float(np.max(np.abs(self._command.joints[side] - measured[side]))) > RETREAT_MAX_LAG_RAD:
+                self._warn("the arm cannot rise: stopping the retreat where it is")
+                self._command.joints[side] = measured[side].copy()
+                self._robot.command(self._command.joints, self._command.grips)
+                return
+            self._command.joints[side] = joints
+            self._robot.command(self._command.joints, self._command.grips)
+            time.sleep(max(0.0, self._dt_s - (time.perf_counter() - started_s)))
+
     def _step_home(self) -> None:
         max_step = HOME_SPEED_RAD_S * self._dt_s
         done = True
@@ -376,6 +496,8 @@ class Collector:
                 self._warn(f"{side} arm is {np.degrees(error):.0f} deg behind its target: holding where it is")
                 self._command.joints[side] = joints.copy()
                 self._clutches[side].engaged = False
+                if self._policy is not None and side == self._policy.side:
+                    self._policy.stop(f"the {side} arm fell behind")
 
 
 def run(
@@ -386,12 +508,16 @@ def run(
     sim: bool,
     quest_ip: str | None,
     dashboard_port: int = dashboard.DEFAULT_PORT,
+    policy: PolicySpec | None = None,
 ) -> None:
     """Opens the devices, runs the loop until Ctrl+C (or a lost SSH connection), then shuts everything down safely.
 
+    @param policy A scripted policy to run instead of Quest teleop, or None.
     @throws StationBusyError Another program (a collector, a check, `dreamcli`) holds the station's arms.
+    @throws PlanError The policy's run has a path the arm cannot follow (before any device opens).
     """
     iks = arms.open_ik(station)  # first: a missing tool center point stops here, before any device opens
+    graph = _make_graph(station, iks, policy) if policy is not None else None
 
     def make_writer() -> dataset.DatasetWriter:
         return dataset.DatasetWriter(
@@ -408,10 +534,48 @@ def run(
     # A simulated YAM drives no hardware, so it takes no lock.
     lock = None if sim else station_lock.acquire("dhk-collect", station.dataset_dir.resolve())
     try:
-        _run_locked(station, controls, iks, dry_run=dry_run, sim=sim, quest_ip=quest_ip, port=dashboard_port)
+        _run_locked(
+            station,
+            controls,
+            iks,
+            dry_run=dry_run,
+            sim=sim,
+            quest_ip=quest_ip,
+            port=dashboard_port,
+            graph=graph,
+            record_policy=policy.record if policy is not None else False,
+        )
     finally:
         if lock is not None:
             lock.close()
+
+
+def _make_graph(station: config.StationConfig, iks: dict[str, ik.ArmIK], spec: PolicySpec) -> unplug_graph.UnplugGraph:
+    """The graph policy, its whole run planned (and printed) before anything opens."""
+    poses = unplug_poses.load_poses(spec.poses)
+    params = unplug_params.load_params(spec.params).scaled(spec.speed_scale)
+    view = unplug_perception.load_view(spec.view) if spec.view is not None else None
+    if view is None:
+        _say("graph policy: no view reference: the taught grasps are used as they are, nothing is located")
+    arm = station.arms[poses.side]
+    try:
+        graph = unplug_graph.UnplugGraph(
+            poses,
+            params,
+            iks[poses.side],
+            arm.workspace_min_m,
+            arm.workspace_max_m,
+            1.0 / station.control_hz,
+            log=_say,
+            cables=spec.cables,
+            stop_after=spec.stop_after,
+            view=view,
+            capture_view=spec.view if spec.capture_view else None,
+        )
+    except ValueError as error:  # a cable number or step that does not exist (PlanError is not a ValueError)
+        raise config.ConfigError(f"graph policy: {error}") from error
+    _say(graph.report)
+    return graph
 
 
 def _run_locked(
@@ -423,6 +587,8 @@ def _run_locked(
     sim: bool,
     quest_ip: str | None,
     port: int,
+    graph: unplug_graph.UnplugGraph | None = None,
+    record_policy: bool = False,
 ) -> None:
     """run() with the station's lock held."""
     signal.signal(signal.SIGTERM, _stop)
@@ -432,8 +598,11 @@ def _run_locked(
             "note: this session runs over SSH outside tmux. If the connection drops it ends, safely (the arms return "
             "and are released); start it inside `tmux new -A -s collect` to keep it running instead."
         )
-    found = devices.DeviceSet(station, sim=sim, quest_ip=quest_ip)
+    found = devices.DeviceSet(station, sim=sim, quest_ip=quest_ip, use_quest=graph is None)
     blank = np.zeros((station.record_height, station.record_width, 3), dtype=np.uint8)
+    # A policy session: the first Enter in the terminal opens the arms, later ones start the run (as Start does).
+    enter = _EnterKey() if graph is not None else None
+    collector: Collector | None = None
 
     def frame(role: str) -> npt.NDArray[np.uint8]:
         if sim:
@@ -466,25 +635,80 @@ def _run_locked(
         log(f"dashboard: {message}")
         return ok, message
 
+    def drive_policy(action: str) -> tuple[bool, str]:
+        assert graph is not None
+        if action == "stop":
+            graph.stop("Stop on the dashboard")
+            message = "stopped: the arm holds where it is (Ctrl+C in the terminal ends the session)"
+        elif collector is None:
+            return False, "the arms are not open yet: press Enter in the terminal first"
+        elif graph.started:
+            return False, "the run has already started"
+        else:
+            graph.start()
+            message = "started"
+        log(f"dashboard: graph {message}")
+        return True, message
+
     board = _open_dashboard(
-        station, frame, port, on_fix=fix, on_task=set_task, on_delete=delete, task_of=lambda: controls.task
+        station,
+        frame,
+        port,
+        on_fix=fix,
+        on_task=set_task,
+        on_delete=delete,
+        task_of=lambda: controls.task,
+        on_policy=drive_policy if graph is not None else None,
     )
 
     monitor = None
     try:
         reported: dict[str, str | None] = {}
         try:
-            robot = wait_and_open_arms(station, found, board, log, dry_run=dry_run, sim=sim, reported=reported)
+            robot = wait_and_open_arms(
+                station,
+                found,
+                board,
+                log,
+                dry_run=dry_run,
+                sim=sim,
+                reported=reported,
+                start_event=enter.pressed if enter is not None else None,
+            )
         except KeyboardInterrupt:
             log("session ended before the arms were opened")
             return
         monitor = _Monitor(found, board, log, reported)
-        collector = None
         try:
+            if graph is not None:
+                wrist = {"left": "wrist_l", "right": "wrist_r"}[graph.side]
+                debug_dir = UNPLUG_DEBUG_DIR / time.strftime("%Y%m%d-%H%M%S")
+                graph.connect(
+                    log=log,
+                    verifier=unplug_verify.TipVerifier(graph.vision, lambda: frame(wrist), debug_dir),
+                    frame_of=frame,
+                    debug_dir=debug_dir,
+                )
             collector = Collector(
-                station, controls.task, robot, found.headset, frames, iks, controls.writer, log=log, controls=controls
+                station,
+                controls.task,
+                robot,
+                found.headset,
+                frames,
+                iks,
+                controls.writer,
+                log=log,
+                controls=controls,
+                policy=graph,
+                record_policy=record_policy,
             )
-            _loop(collector, 1.0 / station.control_hz, board)
+            if graph is not None and enter is not None:
+                enter.on_press = graph.start
+                log(
+                    "graph policy ready: press Enter here (or Start on the dashboard) to start the run; Stop on the "
+                    f"dashboard holds the arm; Ctrl+C ends the session. Locating and tip-check pictures: {debug_dir}"
+                )
+            _loop(collector, 1.0 / station.control_hz, board, quiet=graph is not None)
         finally:
             # From here the shutdown runs to its end: a hang-up, a kill or another Ctrl+C would leave the arms
             # wherever they are. The emergency stop is the way to halt it.
@@ -493,6 +717,10 @@ def _run_locked(
             try:
                 if collector is not None:
                     collector.discard()
+                    if graph is not None and robot.energized:
+                        graph.stop("the session is ending")
+                        log("opening the gripper and lifting the tool clear (the emergency stop halts it)...")
+                        collector.retreat()
                     if robot.energized:
                         log("returning the arms to where they started (the emergency stop halts them)...")
                         collector.go_home()
@@ -519,8 +747,12 @@ def wait_and_open_arms(
     open_arms: Callable[..., arms.Arms] | None = None,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
+    start_event: threading.Event | None = None,
 ) -> arms.Arms:
     """Opens the devices as they become ready, then the arms once everything is ready and A is pressed.
+
+    With `start_event` (a scripted policy's session, no Quest) the event stands for A: it is set by Enter in the
+    terminal, counts under the same rules, and one set before everything is ready is dropped, not kept for later.
 
     Every CHECK_EVERY_S it tries the devices that are not open yet and shows each one's state on the page and, when
     it changes, in the terminal. Nothing opens the arms before A (a simulated YAM needs no A): on a YAM, opening them
@@ -553,23 +785,33 @@ def wait_and_open_arms(
         if wanted != phase:
             phase = wanted
             if board is not None:
-                board.phase(phase)
+                board.phase("ready_enter" if phase == "ready" and start_event is not None else phase)
             if phase == "waiting":
                 waiting_for = [name for name, problem in reported.items() if problem is not None and name != "arms"]
                 log(f"waiting for: {', '.join(waiting_for)} (the dashboard says what each needs)")
             elif phase == "ready":
                 ready_since_s = clock()
-                log("everything is ready: press A on the right controller to open the arms (Ctrl+C quits)")
-        pressed = found.headset.read().pressed if found.headset is not None else frozenset()
+                key = "Enter here" if start_event is not None else "A on the right controller"
+                log(f"everything is ready: press {key} to open the arms (Ctrl+C quits)")
         settled = clock() - ready_since_s >= A_AFTER_READY_S
-        if phase == "opening" or (phase == "ready" and settled and "A" in pressed):
+        if start_event is not None:
+            go = start_event.is_set()
+            if go:
+                start_event.clear()
+                if not (phase == "ready" and settled):
+                    log("Enter: not everything is ready yet, so the arms stay closed")
+                    go = False
+        else:
+            pressed = found.headset.read().pressed if found.headset is not None else frozenset()
+            go = phase == "ready" and settled and "A" in pressed
+        if phase == "opening" or go:
             if board is not None:
                 board.phase("opening")
             log("opening the arms" + ("" if dry_run or sim else ": keep clear of them and of the grippers' jaws"))
             try:
                 robot = open_arms(station, energize=not dry_run, sim=sim)
             except Exception as error:  # noqa: BLE001 - shown, and A tries again
-                arm_error = f"did not open: {error}; fix it, then press A again"
+                arm_error = f"did not open: {error}; fix it, then press {'Enter' if start_event else 'A'} again"
                 log(f"the arms {arm_error}")
                 phase, next_check_s = "", clock()
                 continue
@@ -581,6 +823,25 @@ def wait_and_open_arms(
                 board.phase("")
             return robot
         sleep(WAIT_TICK_S)
+
+
+class _EnterKey:
+    """Enter in the terminal, read on a background thread: each press calls `on_press` if set, else sets `pressed`."""
+
+    def __init__(self) -> None:
+        self.pressed = threading.Event()
+        self.on_press: Callable[[], None] | None = None
+        threading.Thread(target=self._run, name="enter-key", daemon=True).start()
+
+    def _run(self) -> None:
+        try:
+            for _ in sys.stdin:
+                if self.on_press is not None:
+                    self.on_press()
+                else:
+                    self.pressed.set()
+        except (OSError, ValueError):
+            pass  # the terminal is gone: the dashboard's buttons remain
 
 
 class _Monitor:
@@ -649,6 +910,7 @@ def _open_dashboard(
     on_task: Callable[[str], tuple[bool, str]] | None = None,
     on_delete: Callable[[list[int]], tuple[bool, str]] | None = None,
     task_of: Callable[[], str] | None = None,
+    on_policy: Callable[[str], tuple[bool, str]] | None = None,
 ) -> dashboard.Dashboard | None:
     """Starts the dashboard and says how to open it; a taken port leaves the session without one."""
     if not port:
@@ -664,6 +926,7 @@ def _open_dashboard(
             on_task=on_task,
             on_delete=on_delete,
             task_of=task_of,
+            on_policy=on_policy,
         )
     except OSError as error:
         _say(
@@ -676,9 +939,18 @@ def _open_dashboard(
     return board
 
 
-def _loop(collector: Collector, period_s: float, board: dashboard.Dashboard | None = None) -> None:
-    """Ticks at a steady rate until Ctrl+C; a late tick starts the next one at once rather than catching up."""
-    _say("ready: hold a grip to drive an arm, A to record, B to discard, right joystick click to home, Ctrl+C to quit")
+def _loop(
+    collector: Collector, period_s: float, board: dashboard.Dashboard | None = None, quiet: bool = False
+) -> None:
+    """Ticks at a steady rate until Ctrl+C; a late tick starts the next one at once rather than catching up.
+
+    @param quiet Skip the teleop instructions (a policy session prints its own).
+    """
+    if not quiet:
+        _say(
+            "ready: hold a grip to drive an arm, A to record, B to discard, right joystick click to home, "
+            "Ctrl+C to quit"
+        )
     next_s = time.perf_counter()
     snapshot_s = status_s = next_s
     ticks = 0
@@ -708,6 +980,11 @@ def _status_line(snapshot: dict[str, Any]) -> str:
     parts = [f"REC {snapshot['frames']} frames" if snapshot["recording"] else "idle"]
     if snapshot["homing"]:
         parts.append("homing")
+    policy = snapshot.get("policy")
+    if policy is not None:
+        where = f" {policy['cable']} {policy['cable_number']}/{policy['cables']}" if policy["cable"] else ""
+        attempt = f" try {policy['attempt']}/{policy['attempts']}" if policy["cable"] else ""
+        parts.append(f"graph {policy['state']}{where}{attempt}")
     for side in ("left", "right"):
         arm = snapshot["arms"][side]
         x, y, z = arm["tool_m"]
@@ -780,6 +1057,29 @@ def main(argv: list[str] | None = None) -> None:
         default=dashboard.DEFAULT_PORT,
         help=f"the browser dashboard's port on the station (0: none; default {dashboard.DEFAULT_PORT})",
     )
+    policy = parser.add_argument_group("scripted policy (--policy graph: one arm unplugs USB cables, no Quest)")
+    policy.add_argument("--policy", choices=("teleop", "graph"), default="teleop", help="what drives the arms")
+    policy.add_argument("--poses", help="the taught poses (scripts/mine_unplug_rollouts.py writes them)")
+    policy.add_argument(
+        "--unplug-config", help=f"speeds, limits and vision thresholds (default: {UNPLUG_CONFIG} if present)"
+    )
+    policy.add_argument("--cables", help="which cables, numbered as in the poses file, e.g. 1 or 2,3 (default: all)")
+    policy.add_argument(
+        "--stop-after", choices=sorted(unplug_graph.STOP_AFTER), help="hold after this step of the first cable"
+    )
+    policy.add_argument("--speed-scale", type=float, default=1.0, help="slower runs: every speed times this (<= 1)")
+    policy.add_argument("--record", action="store_true", help="record one episode per cable unplugged")
+    policy.add_argument(
+        "--view",
+        help=f"the viewing pose and reference row the plugs are located against (default: {UNPLUG_VIEW} if present)",
+    )
+    policy.add_argument("--no-view", action="store_true", help="locate nothing: use the taught grasps as they are")
+    policy.add_argument(
+        "--capture-view",
+        action="store_true",
+        help="only go to the viewing pose and save what the cameras see there into the --view file, as the new "
+        "reference (the strip where the taught grasps are right)",
+    )
     args = parser.parse_args(argv)
     try:
         station = config.load(args.config)
@@ -787,6 +1087,30 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(f"config: {error}")
     if args.dataset_dir:
         station = dataclasses.replace(station, dataset_dir=pathlib.Path(args.dataset_dir).expanduser())
+    spec = None
+    if args.policy == "graph":
+        if args.sim:
+            sys.exit("--policy graph drives real arms (or a dry run of them): not with --sim")
+        if not args.poses:
+            sys.exit("--policy graph needs --poses (scripts/mine_unplug_rollouts.py writes them)")
+        params_path = args.unplug_config or (UNPLUG_CONFIG if UNPLUG_CONFIG.is_file() else None)
+        try:
+            cables = tuple(int(n) for n in args.cables.split(",")) if args.cables else None
+        except ValueError:
+            sys.exit("--cables takes numbers, e.g. 1 or 2,3")
+        view_path = None if args.no_view else args.view or (UNPLUG_VIEW if UNPLUG_VIEW.is_file() else None)
+        if args.capture_view and view_path is None:
+            sys.exit("--capture-view needs a --view file for the viewing pose (scripts/mine_unplug_rollouts.py)")
+        spec = PolicySpec(
+            pathlib.Path(args.poses),
+            pathlib.Path(params_path) if params_path else None,
+            cables,
+            args.stop_after,
+            args.speed_scale,
+            args.record,
+            pathlib.Path(view_path) if view_path else None,
+            args.capture_view,
+        )
     try:
         run(
             station,
@@ -795,9 +1119,12 @@ def main(argv: list[str] | None = None) -> None:
             sim=args.sim,
             quest_ip=args.quest_ip,
             dashboard_port=args.dashboard_port,
+            policy=spec,
         )
     except (station_lock.StationBusyError, quest.QuestError, arms.ArmsError) as error:
         sys.exit(str(error))
+    except unplug_motion.PlanError as error:
+        sys.exit(f"graph policy: {error}")
     except config.ConfigError as error:  # what the arm model needs, e.g. a Metal or Maker arm's tool center point
         sys.exit(f"config: {error}")
     except dataset.DatasetError as error:  # a --dataset-dir recorded another way (rate, cameras, version)
