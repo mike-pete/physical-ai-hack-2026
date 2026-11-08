@@ -5,6 +5,7 @@ The agent only calls the lab's HTTP API (`dream_hackathon.lab_client`), so the l
 nothing here touches an arm directly. The browser's Voice button joins the room this agent is dispatched to.
 """
 
+import logging
 import pathlib
 import sys
 
@@ -17,6 +18,7 @@ from dream_hackathon import lab_voice  # noqa: E402
 from dream_hackathon.lab_client import LabClient  # noqa: E402
 
 lab_voice.load_env()
+log = logging.getLogger("lab-voice")
 
 ## The models run on LiveKit Inference (no other provider key). Change them here if one is not available to the key.
 STT_MODEL = "assemblyai/universal-streaming"
@@ -69,6 +71,19 @@ async def entrypoint(ctx: JobContext) -> None:
         tts=inference.TTS(model=TTS_MODEL),
         vad=silero.VAD.load(),
     )
+    # What was heard, what the model did and what it said, so a silent session can be told from a deaf one.
+    session.on("user_input_transcribed", lambda ev: ev.is_final and log.info("heard: %s", ev.transcript))
+    session.on(
+        "conversation_item_added",
+        lambda ev: log.info("%s: %s", getattr(ev.item, "role", "?"), getattr(ev.item, "text_content", ev.item)),
+    )
+
+    def tools_ran(ev) -> None:
+        for call, output in ev.zipped():
+            log.info("tool %s(%s) -> %s", call.name, call.arguments, output.output if output else None)
+
+    session.on("function_tools_executed", tools_ran)
+    session.on("error", lambda ev: log.error("session error: %s", getattr(ev, "error", ev)))
     await session.start(agent=LabAssistant(), room=ctx.room)
     await session.generate_reply(instructions="Say you are ready to stop the arms or send them home.")
 
