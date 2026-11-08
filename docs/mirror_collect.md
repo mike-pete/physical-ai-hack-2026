@@ -2,7 +2,7 @@
 
 `scripts/mirror_collect.py` is a second way to record demonstrations, next to the Quest ([data_collection.md](data_collection.md)). You take the **left arm** in your hand and move it; the **right arm** copies it, and the dashboard in your browser starts, saves and discards episodes. No Quest is needed. The episodes are saved in the same LeRobot v2.1 format as `dhk-collect`, so [fine-tuning](fine_tuning.md) works on them the same way.
 
-It works on **Metal and Maker arm stations only** (not the YAM). The station has no screen: you run it over SSH and watch the dashboard in your laptop's browser.
+It works on **Metal and Maker arm stations only** (not the YAM). The station has no screen: you run it over SSH and watch the dashboard in your laptop's browser. A Metal station with a Star Arm 102 leader can use that instead of the left arm: see [star_leader.md](star_leader.md).
 
 ## Read this before you start
 

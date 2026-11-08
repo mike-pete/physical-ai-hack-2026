@@ -106,6 +106,26 @@ uv run python scripts/check_arms.py --config configs/station.yaml
 
 This only reads the arms. YAM arms float in gravity compensation; MakerMods arms are opened with torque off, so support them. Move each arm by hand and check that the numbers for the right side change.
 
+### Star Arm 102 leader (optional, Metal arms)
+
+A Metal station can also record demonstrations with a Star Arm 102 leading the right arm (`scripts/mirror_collect.py --leader-device star`; participants' guide: [star_leader.md](star_leader.md)). Once per station:
+
+1. **Plug in the Star arm's USB-serial adapter and find its port** with `ls -l /dev/serial/by-id/`. It is a CH340 (`usb-1a86_USB_Serial-if00-port0`); the `Protofusion_Labs_CANable` entries are the arms' adapters. The `dialout` group from step 1 lets SSH sessions open it. The port goes on the command line (`--star-port`); nothing about the Star arm goes in `configs/station.yaml`.
+2. **Calibrate the Star arm in makermodslab** (Metal arm, "Star Arm 102 leader"), following the steps makermodslab shows. This powers and moves the Star arm, so you run it. The name you give the calibration is what participants pass as `--star-id`. It is saved as `<name>.json` here:
+
+   ```bash
+   ls ~/.cache/huggingface/lerobot/calibration/teleoperators/rebot_102_leader/
+   ```
+
+   Close makermodslab afterwards: only one program can use a port at a time.
+3. **Check that the Star arm's driver is installed.** It comes with the `makermods` extra (`uv sync --extra makermods --extra realsense`). This prints nothing when it is there:
+
+   ```bash
+   uv run python -c "from lerobot.teleoperators.rebot_102_leader import RebotArm102Leader"
+   ```
+
+4. **Run the first session yourself.** `mirror_collect.py` has no dry run: support the right arm, lay the left arm down, keep a hand on the emergency stop, and follow [star_leader.md](star_leader.md). Check that the right arm stays put until the Star arm is brought to its pose, that every joint and the gripper then move the right way, and that **Go to Home** needs the Star arm brought back afterwards. Then write the port and the calibration name on the station's sheet, where participants find them.
+
 ## 3. The cameras
 
 ```bash
