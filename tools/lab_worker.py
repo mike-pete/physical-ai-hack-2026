@@ -68,6 +68,7 @@ class Backend(Protocol):
     def power_off(self) -> None: ...
     def clear_fault(self) -> str: ...
     def angles(self) -> dict[str, Any]: ...
+    def health(self) -> str: ...
     def arms_ok(self) -> bool: ...
     async def run(self, prompt: str, checkpoint: str, dry_run: bool, stop: asyncio.Event) -> None: ...
     def close(self) -> None: ...
@@ -87,6 +88,7 @@ class DreamBackend:
         self._home, self._types, self._run = home, types, dream_run
         self.on_problem = lambda text: print(text, file=sys.stderr)  # the worker swaps in an alert
         self._monitor: dict[str, Any] = {}
+        self._reported_dead: set[str] = set()
         path = pathlib.Path(STATION_CONFIG).expanduser()
         if not path.is_file():
             raise RuntimeError(f"{path} is missing: the organizers run 'dreamcli setup' for the station")
@@ -112,6 +114,17 @@ class DreamBackend:
             if frame is not None:
                 out[reader.name] = frame.data
         return out
+
+    def health(self) -> str:
+        """Why an open arm stopped, once per arm, or an empty string while all is well."""
+        dead = {name for name, arm in list(self.arms.items()) if not arm.is_alive()}
+        self._reported_dead &= dead  # an arm that was let go or came back may be reported again
+        text = []
+        for name in sorted(dead - self._reported_dead):
+            self._reported_dead.add(name)
+            reason = self.arms[name].why_stopped() or "it stopped answering (no reason given)"
+            text.append(f"the {name} arm stopped: {reason}")
+        return "; ".join(text)
 
     def angles(self) -> dict[str, Any]:
         """Every motor's angle, per arm, for the Motors tab.
@@ -485,6 +498,9 @@ class FakeBackend:
     def clear_fault(self) -> str:
         return "fake: nothing to clear"
 
+    def health(self) -> str:
+        return ""
+
     def angles(self) -> dict[str, Any]:
         t = time.monotonic() - self._t0
         names = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_yaw", "wrist_roll", "gripper")
@@ -620,9 +636,17 @@ class Worker:
     def _live_loop(self) -> None:
         """Writes each camera's latest frame for the page, LIVE_FPS times a second."""
         self.frames_dir.mkdir(parents=True, exist_ok=True)
-        next_angles = 0.0
+        next_angles = next_health = 0.0
         while not self._done.is_set():
             now = time.monotonic()
+            if now >= next_health:
+                next_health = now + 0.5
+                try:
+                    problem = self.backend.health()
+                except Exception:
+                    problem = ""
+                if problem:
+                    self.emit(event="error", message=problem)
             if now < self._watch_until and now >= next_angles:
                 next_angles = now + 1.0 / ANGLES_HZ
                 try:
