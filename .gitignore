@@ -5,3 +5,6 @@ __pycache__/
 .ruff_cache/
 dist/
 configs/station.yaml
+# API keys for the task critic (TYPESAFE_API_KEY, ANTHROPIC_API_KEY): never committed.
+.env
+.env.*
