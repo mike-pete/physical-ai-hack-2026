@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompt Lab</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --card: #fff; --ink: #1b1b1b; --muted: #6b6b66; --line: #dcdcd6;
+    --accent: #1d5fd1; --ok: #1c7c3b; --warn: #b26a00; --bad: #c62828; color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #151515; --card: #1f1f1f; --ink: #ececea; --muted: #9a9a94; --line: #343432;
+      --accent: #6ea0ff; --ok: #5fcf85; --warn: #ffb74d; --bad: #ff6b6b; color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, sans-serif; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 16px; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 14px; }
+  header h1 { font-size: 18px; margin: 0 12px 0 0; }
+  nav { display: flex; gap: 6px; }
+  button, .tab {
+    font: inherit; color: var(--ink); background: var(--card); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 12px; cursor: pointer;
+  }
+  button:hover:not(:disabled), .tab:hover { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .tab.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--bad); }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 14px; }
+  .cams { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+  .cam { background: #000; border-radius: 8px; overflow: hidden; position: relative; aspect-ratio: 16 / 9; }
+  .cam img, .cam video { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .cam span { position: absolute; left: 8px; top: 6px; color: #fff; font-size: 12px; text-shadow: 0 0 4px #000; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .grow { flex: 1 1 260px; min-width: 0; }
+  .badge { padding: 3px 10px; border-radius: 999px; font-weight: 600; background: var(--line); }
+  .badge.running { background: var(--bad); color: #fff; }
+  .badge.weightless, .badge.homing { background: var(--warn); color: #fff; }
+  .badge.holding { background: var(--ok); color: #fff; }
+  .muted { color: var(--muted); }
+  #msg { min-height: 1.4em; }
+  #msg.err { color: var(--bad); }
+  .now { margin-top: 10px; padding: 10px; border: 1px dashed var(--line); border-radius: 8px; white-space: pre-wrap; }
+  textarea, input[type=text], input[type=number] {
+    font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px; width: 100%;
+  }
+  textarea { min-height: 96px; resize: vertical; }
+  input[type=number] { width: 84px; }
+  .prompt { display: grid; gap: 8px; }
+  .confirm { border: 1px solid var(--warn); border-radius: 8px; padding: 8px 10px; background: var(--bg); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr.pick { cursor: pointer; }
+  tr.pick:hover { background: var(--bg); }
+  .st-finished { color: var(--ok); } .st-error { color: var(--bad); } .st-stopped { color: var(--warn); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Prompt Lab</h1>
+    <nav>
+      <button class="tab on" id="tab-prompts" data-tab="prompts">Prompts</button>
+      <button class="tab" id="tab-runs" data-tab="runs">Runs</button>
+    </nav>
+    <button id="home-link" title="Back to the prompts page">Home</button>
+  </header>
+
+  <section class="panel" id="live">
+    <div class="row" style="margin-bottom:10px">
+      <span class="badge" id="state">starting</span>
+      <span id="msg" class="grow muted"></span>
+    </div>
+    <div class="cams" id="cams"></div>
+    <div class="now" id="now" hidden></div>
+    <div class="row" style="margin-top:12px">
+      <button id="b-weightless">Weightless</button>
+      <button id="b-hold">Hold here</button>
+      <button id="b-home">Home arms (slow)</button>
+      <button id="b-off">Park &amp; power off</button>
+      <button id="b-stop" class="danger">Stop run</button>
+    </div>
+    <div class="confirm" id="confirm" hidden style="margin-top:10px">
+      <span id="confirm-text"></span>
+      <button id="confirm-yes" class="primary">Yes, do it</button>
+      <button id="confirm-no">Cancel</button>
+    </div>
+  </section>
+
+  <section id="view-prompts">
+    <div class="row" style="margin-bottom:10px">
+      <button id="add" class="primary">+ New prompt</button>
+      <span class="muted">Weightless, place both arms, Hold here, then Run. A run starts from where the arms are.</span>
+    </div>
+    <div id="prompts" class="row" style="display:grid;gap:12px"></div>
+  </section>
+
+  <section id="view-runs" hidden>
+    <div class="panel" id="player" hidden>
+      <div class="row"><strong id="player-title" class="grow"></strong><button id="player-close">Close</button></div>
+      <div class="muted" id="player-sub" style="margin:4px 0 10px"></div>
+      <div class="cams" id="player-cams"></div>
+    </div>
+    <div class="panel" style="overflow-x:auto">
+      <table>
+        <thead><tr><th>#</th><th>Started</th><th>Prompt</th><th>Status</th><th>Length</th></tr></thead>
+        <tbody id="runs"></tbody>
+      </table>
+      <div class="muted" id="runs-empty" hidden>No runs yet.</div>
+    </div>
+  </section>
+</div>
+
+<script>
+const HEADERS = { 'Content-Type': 'application/json', 'X-Lab-Dashboard': '1' };
+const $ = (id) => document.getElementById(id);
+let status = { state: 'starting', cameras: [], run: null };
+let pending = null;          // the action waiting for the in-page confirmation
+let drafts = {};             // unsaved prompt edits, kept across the page's refreshes
+let camKey = '';
+
+async function post(path, body) {
+  const res = await fetch(path, { method: 'POST', headers: HEADERS, body: JSON.stringify(body || {}) });
+  const data = await res.json().catch(() => ({ ok: false, error: 'bad reply' }));
+  say(data.ok ? data.message : data.error, !data.ok);
+  refresh();
+  return data;
+}
+function say(text, err) { const m = $('msg'); m.textContent = text || ''; m.className = 'grow ' + (err ? 'err' : 'muted'); }
+
+function ask(text, action) {
+  pending = action;
+  $('confirm-text').textContent = text + ' ';
+  $('confirm').hidden = false;
+}
+$('confirm-no').onclick = () => { pending = null; $('confirm').hidden = true; };
+$('confirm-yes').onclick = () => { const a = pending; pending = null; $('confirm').hidden = true; if (a) a(); };
+
+function show(tab) {
+  for (const t of ['prompts', 'runs']) {
+    $('view-' + t).hidden = t !== tab;
+    $('tab-' + t).classList.toggle('on', t === tab);
+  }
+  if (tab === 'runs') loadRuns();
+}
+document.querySelectorAll('.tab').forEach((b) => (b.onclick = () => show(b.dataset.tab)));
+$('home-link').onclick = () => { closePlayer(); show('prompts'); window.scrollTo(0, 0); };
+
+// ---- arm controls
+$('b-weightless').onclick = () => ask('Both arms go weightless. Support them with a hand first.', () => post('/api/arms/weightless'));
+$('b-hold').onclick = () => post('/api/arms/hold');
+$('b-home').onclick = () => ask('Both arms move slowly to home. Keep clear of them.', () => post('/api/arms/home'));
+$('b-off').onclick = () => ask('The arms park at rest and switch off. Support them.', () => post('/api/arms/power_off'));
+$('b-stop').onclick = () => post('/api/stop');
+
+function renderStatus() {
+  const s = status, st = s.state;
+  const badge = $('state'); badge.textContent = st; badge.className = 'badge ' + st;
+  $('b-weightless').disabled = !['idle', 'holding'].includes(st);
+  $('b-hold').disabled = st !== 'weightless';
+  $('b-home').disabled = !['idle', 'holding', 'weightless'].includes(st);
+  $('b-off').disabled = !['holding', 'weightless'].includes(st);
+  $('b-stop').disabled = st !== 'running';
+  const now = $('now');
+  if (s.run) {
+    now.hidden = false;
+    now.textContent = (s.run.dry_run ? '[dry run] ' : '') + 'Run ' + s.run.id + ' · ' + s.run.elapsed_s + ' s of '
+      + s.run.max_seconds + ' s · ' + s.run.checkpoint + '\n' + s.run.prompt;
+  } else now.hidden = true;
+  if (st !== 'running' && !$('msg').className.includes('err') && s.message) say(s.message, false);
+  const key = s.cameras.join(',');
+  if (key !== camKey) {
+    camKey = key;
+    $('cams').replaceChildren(...s.cameras.map((c) => {
+      const d = document.createElement('div'); d.className = 'cam';
+      const img = document.createElement('img'); img.dataset.role = c; img.alt = c;
+      const label = document.createElement('span'); label.textContent = c;
+      d.append(img, label); return d;
+    }));
+  }
+  document.querySelectorAll('#prompts button.run').forEach((b) => (b.disabled = st !== 'holding'));
+}
+
+async function refresh() {
+  try { status = await (await fetch('/api/status')).json(); renderStatus(); }
+  catch (e) { say('lost the connection to the server', true); }
+}
+function pollCameras() {
+  document.querySelectorAll('#cams img').forEach((img) => {
+    if (img.dataset.busy) return;
+    img.dataset.busy = '1';
+    const next = new Image();
+    next.onload = () => { img.src = next.src; delete img.dataset.busy; };
+    next.onerror = () => { delete img.dataset.busy; };
+    next.src = '/api/camera/' + img.dataset.role + '.jpg?t=' + Date.now();
+  });
+}
+
+// ---- prompts
+async function loadPrompts() {
+  const list = await (await fetch('/api/prompts')).json();
+  const box = $('prompts'); box.replaceChildren();
+  if (!list.length) { const p = document.createElement('div'); p.className = 'muted'; p.textContent = 'No prompts yet: press + New prompt.'; box.append(p); }
+  for (const p of list) box.append(card(p));
+  renderStatus();
+}
+function card(p) {
+  const el = document.createElement('div'); el.className = 'panel prompt'; el.style.margin = 0;
+  const text = document.createElement('textarea'); text.value = drafts[p.id]?.text ?? p.text;
+  const cp = document.createElement('input'); cp.type = 'text'; cp.value = drafts[p.id]?.cp ?? p.checkpoint;
+  const secs = document.createElement('input'); secs.type = 'number'; secs.value = drafts[p.id]?.secs ?? 180; secs.min = 5; secs.max = 3600;
+  const dry = document.createElement('input'); dry.type = 'checkbox'; dry.checked = drafts[p.id]?.dry ?? false;
+  const keep = () => (drafts[p.id] = { text: text.value, cp: cp.value, secs: secs.value, dry: dry.checked });
+  [text, cp, secs, dry].forEach((i) => i.addEventListener('input', keep));
+  const dryLabel = document.createElement('label'); dryLabel.append(dry, ' Dry run');
+  const run = Object.assign(document.createElement('button'), { textContent: 'Run', className: 'primary run' });
+  const save = Object.assign(document.createElement('button'), { textContent: 'Save' });
+  const del = Object.assign(document.createElement('button'), { textContent: 'Delete', className: 'danger' });
+  run.onclick = async () => {
+    const go = async () => { await post('/api/prompts/' + p.id, { text: text.value, checkpoint: cp.value }); // keep the edit
+      await post('/api/prompts/' + p.id + '/run', { dry_run: dry.checked, max_seconds: Number(secs.value) }); };
+    dry.checked ? go() : ask('The arms will move. Hand on the emergency stop, everyone clear. Run it?', go);
+  };
+  save.onclick = async () => { await post('/api/prompts/' + p.id, { text: text.value, checkpoint: cp.value }); delete drafts[p.id]; loadPrompts(); };
+  del.onclick = () => ask('Delete this prompt? Past runs keep their copy of it.', async () => { await post('/api/prompts/' + p.id + '/delete'); delete drafts[p.id]; loadPrompts(); });
+  const opts = document.createElement('div'); opts.className = 'row';
+  const l1 = document.createElement('span'); l1.className = 'muted'; l1.textContent = 'max seconds';
+  opts.append(dryLabel, l1, secs);
+  const actions = document.createElement('div'); actions.className = 'row'; actions.append(run, save, del);
+  const cl = document.createElement('div'); cl.className = 'muted'; cl.textContent = 'checkpoint';
+  el.append(text, cl, cp, opts, actions);
+  return el;
+}
+$('add').onclick = async () => {
+  const r = await post('/api/prompts', { text: 'Describe the task in plain words.' });
+  if (r.ok) loadPrompts();
+};
+
+// ---- runs
+function fmt(iso) { return iso ? new Date(iso).toLocaleString() : ''; }
+function length(r) { return r.ended_at ? Math.round((new Date(r.ended_at) - new Date(r.started_at)) / 1000) + ' s' : 'running'; }
+async function loadRuns() {
+  const runs = await (await fetch('/api/runs')).json();
+  $('runs-empty').hidden = runs.length > 0;
+  $('runs').replaceChildren(...runs.map((r) => {
+    const tr = document.createElement('tr'); tr.className = 'pick';
+    const cells = [r.id, fmt(r.started_at), (r.dry_run ? '[dry] ' : '') + r.prompt_text, r.status, length(r)];
+    cells.forEach((c, i) => { const td = document.createElement('td'); td.textContent = c; if (i === 3) td.className = 'st-' + r.status; tr.append(td); });
+    tr.onclick = () => openPlayer(r);
+    return tr;
+  }));
+}
+function openPlayer(r) {
+  $('player').hidden = false;
+  $('player-title').textContent = 'Run ' + r.id + ' (' + r.status + ')';
+  $('player-sub').textContent = r.prompt_text + (r.error ? '\n' + r.error : '');
+  const roles = status.cameras.length ? status.cameras : ['overhead', 'wrist_l', 'wrist_r'];
+  $('player-cams').replaceChildren(...roles.map((c) => {
+    const d = document.createElement('div'); d.className = 'cam';
+    const v = document.createElement('video'); v.controls = true; v.preload = 'metadata'; v.muted = true;
+    v.src = '/api/runs/' + r.id + '/video/' + c + '.mp4';
+    const label = document.createElement('span'); label.textContent = c;
+    d.append(v, label); return d;
+  }));
+  window.scrollTo(0, 0);
+}
+function closePlayer() { $('player').hidden = true; $('player-cams').replaceChildren(); }
+$('player-close').onclick = closePlayer;
+
+refresh(); loadPrompts();
+setInterval(refresh, 500);
+setInterval(pollCameras, 150);
+setInterval(() => { if (!$('view-runs').hidden && $('player').hidden) loadRuns(); }, 5000);
+</script>
+</body>
+</html>

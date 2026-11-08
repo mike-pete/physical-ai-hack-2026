@@ -28,6 +28,7 @@ realsense = ["pyrealsense2>=2.55"]
 [project.scripts]
 dhk-collect = "dream_hackathon.collect:main"
 dhk-dataset = "dream_hackathon.dataset_cli:main"
+dhk-lab = "dream_hackathon.lab:main"
 
 [dependency-groups]
 dev = [

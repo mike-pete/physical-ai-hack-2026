@@ -31,7 +31,7 @@ Your station is ready: the arms, cameras, Quest and the Dream library are set up
 
 Dream-1 runs on your station's arms without any training, so fine-tuning is optional. Pick what suits your project, or combine them:
 
-- **Run Dream-1 as it is.** Give it a task in plain words and it drives the arms: `dreamcli robot run --task "..."` ([docs/running_your_model.md](docs/running_your_model.md#no-fine-tune-yet)).
+- **Run Dream-1 as it is.** Give it a task in plain words and it drives the arms: `dreamcli robot run --task "..."` ([docs/running_your_model.md](docs/running_your_model.md#no-fine-tune-yet)). To keep a list of prompts, watch the cameras and save every run, use the [Prompt Lab](docs/lab.md) (`uv run dhk-lab`).
 - **Build with the Dream API.** Write your own program around Dream-1: see [Build with the Dream API](#build-with-the-dream-api) below.
 - **Teach it your task (optional).** Collect demonstrations, then fine-tune Dream-1 on them: the two steps below.
 
