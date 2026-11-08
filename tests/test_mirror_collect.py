@@ -496,3 +496,23 @@ def test_the_leader_homing_wrapper_rewrites_frames_only_while_a_target_is_set(mc
     device.bus.sync_write_metal(commands)
     assert sent[0] == commands and sent[2] == commands
     assert sent[1]["shoulder_pan"][:3] == (mc.LEADER_HOME_KP, mc.LEADER_HOME_KD, pytest.approx(45.0))
+
+
+def test_the_leader_ramps_from_its_last_target_so_the_error_builds(mc: ModuleType) -> None:
+    """A target that follows a stalled arm never exerts more than one tick's step; this one runs ahead of it."""
+    stuck = np.full(6, 0.5)
+    ahead = stuck + 0.05
+    _, _, leader = mc._home_both_step(HOME, HOME, stuck, HOME, 0.025, 1.0, ahead)
+    assert np.allclose(leader, np.full(6, 0.5) + 0.05 - 0.025)
+    assert np.allclose(mc._home_both_step(HOME, HOME, stuck, HOME, 0.025, 1.0)[2], np.full(6, 0.475))
+
+
+def test_the_leader_target_never_runs_further_ahead_than_the_cap(mc: ModuleType) -> None:
+    stuck = np.full(6, 0.5)
+    _, _, leader = mc._home_both_step(HOME, HOME, stuck, HOME, 0.025, 1.0, np.full(6, 0.0))
+    assert np.allclose(leader, stuck - mc.LEADER_HOME_MAX_LEAD_RAD)
+
+
+def test_the_leader_counts_as_home_within_its_looser_bound(mc: ModuleType) -> None:
+    assert mc._home_both_step(HOME, HOME, HOME + 0.04, HOME, 0.1, 1.0)[0] == "reached"
+    assert mc._home_both_step(HOME + 0.04, HOME, HOME, HOME, 0.1, 1.0)[0] == "move"

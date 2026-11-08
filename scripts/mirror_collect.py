@@ -58,6 +58,13 @@ HOME_TOLERANCE_RAD = 0.02
 ## The MIT gains the gravity-compensated leader is driven home with: MetalLeader's default hold gains.
 LEADER_HOME_KP = 50.0
 LEADER_HOME_KD = 1.0
+## The leader has no stiff position loop of its own: friction and the gravity model's error leave it a little short of
+## its target, so it counts as home within this looser bound (radians).
+LEADER_HOME_TOLERANCE_RAD = 0.05
+## The leader's target runs ahead of the arm by at most this much (radians), so the error builds until friction gives
+## way (a target that follows the arm never exerts more than one tick's step) while the torque stays at most
+## LEADER_HOME_KP x this.
+LEADER_HOME_MAX_LEAD_RAD = 0.15
 ## Homing gives up after this long and mirroring resumes, so a joint that cannot reach home cannot lock the session.
 HOME_TIMEOUT_S = 30.0
 ## The task an episode records when none is given, and the longest task text Dream accepts (as in collect.py).
@@ -125,7 +132,11 @@ def _command_follower(device, arm_cfg, joints_rad: np.ndarray, grip: float, grip
 # ------------------------------------------------------------------ loop helpers
 
 def _home_step(
-    measured: np.ndarray | None, home: np.ndarray, max_step: float, elapsed_s: float
+    measured: np.ndarray | None,
+    home: np.ndarray,
+    max_step: float,
+    elapsed_s: float,
+    tolerance: float = HOME_TOLERANCE_RAD,
 ) -> tuple[Literal["reached", "timeout", "hold", "move"], np.ndarray | None]:
     """One tick of the homing ramp.
 
@@ -133,11 +144,12 @@ def _home_step(
     @param home The joints to return to.
     @param max_step The most any joint may move this tick, in radians.
     @param elapsed_s How long homing has been running.
-    @return ("reached", None) once every joint is within HOME_TOLERANCE_RAD of home; ("timeout", None) after
+    @param tolerance How close to home every joint must be, in radians.
+    @return ("reached", None) once every joint is within the tolerance of home; ("timeout", None) after
         HOME_TIMEOUT_S; ("hold", None) while the joints are unknown (a ramp from a placeholder pose would command a
         jump); otherwise ("move", the next joint command).
     """
-    if measured is not None and float(np.max(np.abs(home - measured))) < HOME_TOLERANCE_RAD:
+    if measured is not None and float(np.max(np.abs(home - measured))) < tolerance:
         return "reached", None
     if elapsed_s > HOME_TIMEOUT_S:
         return "timeout", None
@@ -153,6 +165,7 @@ def _home_both_step(
     leader_home: np.ndarray | None,
     max_step: float,
     elapsed_s: float,
+    leader_target: np.ndarray | None = None,
 ) -> tuple[Literal["reached", "timeout", "hold", "move"], np.ndarray | None, np.ndarray | None]:
     """One tick of homing both arms, each ramped at the same capped speed.
 
@@ -162,18 +175,27 @@ def _home_both_step(
     @param leader_home The leader's home, or None when the leader cannot be driven (only the follower homes).
     @param max_step The most any joint may move this tick, in radians.
     @param elapsed_s How long homing has been running.
+    @param leader_target The leader target commanded last tick, or None on the first tick. The leader ramps from it,
+        not from where the arm is, so a joint held back by friction builds the error that moves it (see
+        LEADER_HOME_MAX_LEAD_RAD).
     @return (outcome, follower command, leader command). "reached" once both arms are home; "timeout" once either has
         run out of time; "hold" while neither arm can be read; otherwise "move". An arm that is home keeps being
         commanded to its home while the other arrives; a command is None for an arm whose joints are unknown.
     """
     outcomes = []
     commands = []
-    for measured, home in ((follower, follower_home), (leader, leader_home)):
+    for measured, home, tolerance in (
+        (follower, follower_home, HOME_TOLERANCE_RAD),
+        (leader, leader_home, LEADER_HOME_TOLERANCE_RAD),
+    ):
         if home is None:
             outcomes.append("reached")
             commands.append(None)
             continue
-        outcome, command = _home_step(measured, home, max_step, elapsed_s)
+        outcome, command = _home_step(measured, home, max_step, elapsed_s, tolerance)
+        if outcome == "move" and measured is leader and leader_target is not None:
+            ahead = leader_target + np.clip(home - leader_target, -max_step, max_step)
+            command = measured + np.clip(ahead - measured, -LEADER_HOME_MAX_LEAD_RAD, LEADER_HOME_MAX_LEAD_RAD)
         outcomes.append(outcome)
         commands.append(home if outcome == "reached" else command)
     if "timeout" in outcomes:
@@ -218,7 +240,10 @@ class _LeaderHoming:
 
     def set_target(self, joints_rad: np.ndarray | None) -> None:
         """Drives the leader's six joints to these angles, or lets it go back to weightless with None."""
-        self._target_deg = None if joints_rad is None else {m: math.degrees(v) for m, v in zip(MOTORS, joints_rad, strict=True)}
+        if joints_rad is None:
+            self._target_deg = None
+        else:
+            self._target_deg = {m: math.degrees(v) for m, v in zip(MOTORS, joints_rad, strict=True)}
 
     def _send(self, commands: dict) -> None:
         self._write(_homing_frames(commands, self._target_deg))
@@ -861,6 +886,7 @@ def main() -> None:
     episode = None
     tick = 0
     homing_since: float | None = None
+    leader_target: np.ndarray | None = None
     applied_task_version = 0
 
     print("\nReady. Controls (type then Enter, or use the dashboard):")
@@ -910,8 +936,10 @@ def main() -> None:
                     leader_home,
                     home_speed * dt,
                     time.monotonic() - homing_since,
+                    leader_target,
                 )
                 if outcome == "move":
+                    leader_target = leader_command
                     try:
                         if command is not None:
                             _command_follower(follower_dev, follower_cfg, command, home_grip, args.grip_extra)
@@ -920,6 +948,7 @@ def main() -> None:
                     except Exception as e:
                         print(f"home step error: {e}")
                 elif outcome != "hold":
+                    leader_target = None
                     if leader_homing is not None:
                         leader_homing.set_target(None)
                     with dash_state.lock:
@@ -930,8 +959,17 @@ def main() -> None:
                         print(
                             f"↩ Homing gave up after {HOME_TIMEOUT_S:.0f} s; mirroring resumes where the arms stopped."
                         )
+                        for name, measured, home in (
+                            (args.follower, follower_joints, follower_home),
+                            (args.leader, leader_joints, leader_home),
+                        ):
+                            if home is not None:
+                                worst = int(np.argmax(np.abs(home - measured)))
+                                off = math.degrees(home[worst] - measured[worst])
+                                print(f"    {name} arm: {MOTORS[worst]} was {off:+.1f}° from home")
             else:
                 homing_since = None
+                leader_target = None
                 if leader_ok:
                     try:
                         _command_follower(follower_dev, follower_cfg, leader_joints, leader_grip, args.grip_extra)
