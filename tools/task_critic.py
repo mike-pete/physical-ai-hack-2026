@@ -20,7 +20,8 @@ plain HTTPS from the standard library; the keys come from the environment (`TYPE
 `GEMINI_API_KEY`) and are never printed or logged.
 
 Pictures are cropped to the region the task file names before they go anywhere, because the scene camera also sees the
-people around the table. `count_faces()` is a safety net on that crop, not a guarantee.
+people around the table. `count_faces()` (OpenCV's detector, local) and `TypeSafeFaceCheck` (a TypeSafe question, a
+second and far better check) are safety nets on that crop, not guarantees.
 
 ```
 uv run python tools/task_critic.py questions configs/tasks/usb-cables.yaml   # the exact questions, nothing is sent
@@ -64,6 +65,14 @@ GEMINI_MODEL = "gemini-4-argon"
 
 ## What a vote may be. Anything else in a reply is an error, never a guess.
 VOTE_ANSWERS = ("yes", "no", "unsure")
+
+## The second face check: a crop is dropped when TypeSafe's chance that it shows a face is at least this. Measured on
+## 97 labelled pictures (docs/critic_eval.md): crops without a face got at most 0.16 and pictures with a face at least
+## 0.76, so 0.3 lies in the gap and leans towards dropping a picture.
+FACE_BLOCK_AT = 0.3
+FACE_QUESTION = "Is a person's face visible in `{picture}`?"
+## Pictures in one face-check request.
+FACE_BATCH = 8
 
 ## What TypeSafe accepts of an image: each side in 280..1568 pixels and at most 2,458,624 pixels in all.
 MIN_SIDE = 280
@@ -971,6 +980,15 @@ def _key(name: str, given: str | None) -> str:
     return key
 
 
+def typesafe_headers(key: str) -> dict[str, str]:
+    """The headers of a TypeSafe request that carries pictures (`TypeSafe-Danger-Zone-Images` turns them on)."""
+    return {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "TypeSafe-Danger-Zone-Images": "true",
+    }
+
+
 def redact(body: Mapping[str, Any]) -> dict[str, Any]:
     """A request body for a log: every image's bytes replaced by their size, so the payload can be kept and rerun."""
     out = json.loads(json.dumps(body, default=str))
@@ -1020,15 +1038,69 @@ class TypeSafeGate:
         body = self.request(spec, images)
         if self._log is not None:
             self._log(redact(body))
-        headers = {
-            "Authorization": f"Bearer {self._key}",
-            "Content-Type": "application/json",
-            "TypeSafe-Danger-Zone-Images": "true",
-        }
-        reply = self._post(TYPESAFE_URL, headers, body)
+        reply = self._post(TYPESAFE_URL, typesafe_headers(self._key), body)
         if "answers" not in reply:
             raise CriticError(f"TypeSafe's reply has no answers: {str(reply)[:300]}")
         return parse_answers(reply["answers"])
+
+
+class TypeSafeFaceCheck:
+    """A second face check on a camera crop, by TypeSafe's Jev: one yes/no question per picture, "is a person's face
+    visible?", asked of up to FACE_BATCH pictures in a request.
+
+    On 97 labelled pictures it found every face, a partly visible one too, where OpenCV's detector found 4 of 48, and
+    it raised no false alarm on 49 crops (docs/critic_eval.md). It is still a safety net: look at the crops. A call
+    that fails raises; it is never read as "no face".
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = TYPESAFE_MODEL,
+        *,
+        threshold: float = FACE_BLOCK_AT,
+        post: Callable[..., dict[str, Any]] = post_json,
+    ):
+        if not 0.0 < threshold <= 1.0:
+            raise CriticError(f"the face threshold must be above 0 and at most 1, got {threshold}")
+        self._key = _key("TYPESAFE_API_KEY", api_key)
+        self.model = model
+        self.threshold = threshold
+        self._post = post
+
+    def request(self, jpegs: Sequence[bytes]) -> dict[str, Any]:
+        """The request body: each picture is an asset, a state entry `picture_<n>` and a question `face_<n>`."""
+        assets: dict[str, Any] = {}
+        state: dict[str, str] = {}
+        questions: dict[str, dict[str, Any]] = {}
+        for n, jpeg in enumerate(jpegs):
+            reference = uuid.uuid4().hex
+            state[f"picture_{n}"] = reference
+            assets[reference] = {"type": "image", "format": "jpeg", "data_base64": base64.b64encode(jpeg).decode()}
+            questions[f"face_{n}"] = {"type": "noul", "instructions": FACE_QUESTION.format(picture=f"picture_{n}")}
+        return {"model": self.model, "state": state, "questions": questions, "assets": assets}
+
+    def probabilities(self, jpegs: Sequence[bytes]) -> list[float]:
+        """TypeSafe's chance, for each picture in order, that it shows a face.
+
+        @throws CriticError A call failed, or an answer is missing or not a probability.
+        """
+        found: list[float] = []
+        for start in range(0, len(jpegs), FACE_BATCH):
+            chunk = jpegs[start : start + FACE_BATCH]
+            reply = self._post(TYPESAFE_URL, typesafe_headers(self._key), self.request(chunk))
+            if "answers" not in reply:
+                raise CriticError(f"TypeSafe's reply has no answers: {str(reply)[:300]}")
+            nouls = parse_answers(reply["answers"]).nouls
+            for n in range(len(chunk)):
+                if f"face_{n}" not in nouls:
+                    raise CriticError(f"TypeSafe's reply has no answer for picture {start + n}")
+                found.append(nouls[f"face_{n}"])
+        return found
+
+    def flags(self, jpegs: Sequence[bytes]) -> list[bool]:
+        """For each picture in order: True when it may show a face (the chance reaches the threshold)."""
+        return [p >= self.threshold for p in self.probabilities(jpegs)]
 
 
 def parse_vote(reply: Mapping[str, Any], answer_key: str) -> Vote:

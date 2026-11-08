@@ -9,7 +9,7 @@ To use the critic on a live run, to stop it when the task is done and guide it w
 ## Read this first
 
 - **Step 1 moves the arms.** It is the same real run as in [running your model](running_your_model.md#3-run-it): a hand on the emergency stop, everyone out of the arms' reach, and a dry run first when anything is new. A dry run saves nothing, so it does not record an episode.
-- **Pictures leave this computer in step 4, and only then.** The critic sends cropped camera pictures to TypeSafe or Gemini (whichever you pick) and, for rewritten prompts, to Claude or Gemini (`--rewriter`). The Gemini gate sends only a zoom on the strip, which lies inside the table crop; the rewriter also sees the scene crop, for each scene that is not done. The scene camera also sees the people around the table, so the tool crops each picture to the table (`crop` in the task file), drops any picture where a face detector finds a face, and asks before it sends. The detector is a safety net, not a guarantee: **look at the cropped pictures yourself in step 3.**
+- **Pictures leave this computer in step 4, and, for the face check, in step 3.** The critic sends cropped camera pictures to TypeSafe or Gemini (whichever you pick) and, for rewritten prompts, to Claude or Gemini (`--rewriter`). The Gemini gate sends only a zoom on the strip, which lies inside the table crop; the rewriter also sees the scene crop, for each scene that is not done. The scene camera also sees the people around the table, so the tool crops each picture to the table (`crop` in the task file), drops any picture where a face check finds a face, and asks before it sends. Step 3's face check sends the crops to TypeSafe when `TYPESAFE_API_KEY` is set (see [the face check](#the-face-check)). The checks are safety nets, not guarantees: **look at the cropped pictures yourself in step 3.**
 - **The keys stay in your shell.** Never put `TYPESAFE_API_KEY`, `ANTHROPIC_API_KEY` or `GEMINI_API_KEY` in a file you commit or in a command line. Step 4 shows how to type them without saving them in the shell's history.
 
 ## 1. Record the runs
@@ -58,11 +58,30 @@ The sheet has one row per episode, with the prompt filled in. For each, watch th
 ## 3. Cut the pictures, and look at them
 
 ```bash
-# 🤖 on the station: reads the episodes' videos, sends nothing
+# 🤖 on the station: reads the episodes' videos; sends nothing unless TYPESAFE_API_KEY is set (see below)
 uv run python tools/critic_eval.py frames ~/hackathon_data/critic-eval/cables --out ~/hackathon_data/critic-eval/eval
 ```
 
-This writes five pictures per run, from the last second, to `eval/frames/<episode>/`, cropped as the task file says, and next to each the zoomed `strip` picture the vote gate looks at. **These files are exactly what step 4 sends.** Open a few of each run (copy them to your laptop with `scp -r` if the station has no screen), and check that no one's face is in them. If one is, narrow the `crop` in the task file and cut again. The command also says how many picture sets it dropped because it found a face.
+This writes five pictures per run, from the last second, to `eval/frames/<episode>/`, cropped as the task file says, and next to each the zoomed `strip` picture the vote gate looks at. **These files are exactly what step 4 sends.** Open a few of each run (copy them to your laptop with `scp -r` if the station has no screen), and check that no one's face is in them. If one is, narrow the `crop` in the task file and cut again. The command also says how many picture sets it dropped because it found a face, and which check found it.
+
+### The face check
+
+`frames` runs up to two checks on each camera's crop (never on the zoomed pictures, which lie inside the crop) and drops the picture set when either finds a face:
+
+1. **OpenCV's detector**, on this computer. Nothing is sent. It only finds faces that look straight at the camera and are large, so it finds few of the faces around a table.
+2. **A TypeSafe question**, "is a person's face visible?", sent with the crops OpenCV let through. It finds far more. It runs when `TYPESAFE_API_KEY` is set (`--face-check auto`, the default), says what it will send and asks first (`--yes` to skip the question). A crop is dropped when TypeSafe's chance of a face is at least 0.3 (`--face-threshold`). A TypeSafe call that fails stops the command and keeps nothing; it is never read as "no face".
+
+`--face-check opencv` keeps every picture on this computer, `--face-check typesafe` skips OpenCV's detector (it also raised false alarms on crops with no face), and `--skip-face-check` turns both off (not advised).
+
+**How well each finds faces.** On 2026-11-08, 49 frames from the golf-ball and cable demonstrations (scene camera) were cut as a full frame and as the task's crop, and one person (Claude, by eye) labelled each picture: 39 full frames with a face clearly visible, 9 with only part of one, and 49 crops with none.
+
+| Pictures | OpenCV flagged | TypeSafe flagged (chance of a face at least 0.5) |
+| --- | --- | --- |
+| 39 full frames, a face clearly visible | 4 | 39 |
+| 9 full frames, part of a face | 0 | 9 |
+| 49 crops, no face | 2 | 0 |
+
+TypeSafe's chance of a face was at least 0.76 on every picture with a face and at most 0.16 on every crop without one. Read it with care: one labeller, three labels corrected after seeing TypeSafe's answers (it had found faces in frames first called face-free), a small set from two days with the same few people, and the scene camera only. It is a reason to prefer TypeSafe's check over OpenCV's, not a guarantee. The crop is what keeps faces out; **look at the crops.**
 
 ## 4. Ask the critic
 

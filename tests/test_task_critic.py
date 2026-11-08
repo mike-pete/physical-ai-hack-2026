@@ -336,6 +336,65 @@ def test_a_missing_key_is_named_and_nothing_is_sent(tc, monkeypatch) -> None:
     assert tc.TypeSafeGate()._key == "from-env"
 
 
+def fake_face_post(sent: list):
+    """A TypeSafe stand-in that answers each picture with its first byte / 100, so a mix-up of order shows."""
+
+    def post(url, headers, body):
+        sent.append((url, headers, body))
+        answers = {}
+        for key in body["questions"]:
+            n = key.removeprefix("face_")
+            asset = body["assets"][body["state"][f"picture_{n}"]]
+            answers[key] = {"type": "noul", "noul": base64.b64decode(asset["data_base64"])[0] / 100}
+        return {"answers": answers}
+
+    return post
+
+
+def test_the_face_check_asks_one_question_per_picture_in_batches(tc) -> None:
+    sent: list = []
+    check = tc.TypeSafeFaceCheck("sk-secret", post=fake_face_post(sent))
+    pictures = [bytes([i]) + b"jpeg" for i in range(20)]
+    assert check.probabilities(pictures) == [i / 100 for i in range(20)]  # in order, across the batches
+    assert [len(body["state"]) for _, _, body in sent] == [8, 8, 4]  # tc.FACE_BATCH pictures a request
+    url, headers, body = sent[0]
+    assert url == "https://api.typesafe.ai/v1/systemone"
+    assert headers["Authorization"] == "Bearer sk-secret" and headers["TypeSafe-Danger-Zone-Images"] == "true"
+    assert body["model"] == "jev-1.14.0"
+    assert body["questions"]["face_3"] == {
+        "type": "noul",
+        "instructions": "Is a person's face visible in `picture_3`?",
+    }
+    assert set(body["state"].values()) == set(body["assets"])  # every picture is an asset and is referenced
+    assert "sk-secret" not in json.dumps(body)
+
+
+def test_the_face_check_flags_at_its_threshold_and_sends_nothing_for_no_pictures(tc) -> None:
+    sent: list = []
+    check = tc.TypeSafeFaceCheck("k", threshold=0.1, post=fake_face_post(sent))
+    assert check.flags([bytes([i]) for i in (5, 10, 11)]) == [False, True, True]  # 0.05, 0.10, 0.11
+    assert tc.TypeSafeFaceCheck("k", post=fake_face_post(sent)).threshold == tc.FACE_BLOCK_AT == 0.3
+    sent.clear()
+    assert check.flags([]) == [] and sent == []
+
+
+def test_a_face_check_that_cannot_answer_is_an_error_not_no_face(tc) -> None:
+    with pytest.raises(tc.CriticError, match="no answers"):
+        tc.TypeSafeFaceCheck("k", post=lambda *a: {"error": "nope"}).flags([b"x"])
+    with pytest.raises(tc.CriticError, match="no answer for picture 0"):
+        tc.TypeSafeFaceCheck("k", post=lambda *a: {"answers": {}}).flags([b"x"])
+    with pytest.raises(tc.CriticError, match="from 0 to 1"):
+        tc.TypeSafeFaceCheck("k", post=lambda *a: {"answers": {"face_0": {"type": "noul", "noul": 7}}}).flags([b"x"])
+    with pytest.raises(tc.CriticError, match="threshold"):
+        tc.TypeSafeFaceCheck("k", threshold=0)
+
+
+def test_the_face_check_needs_the_typesafe_key(tc, monkeypatch) -> None:
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    with pytest.raises(tc.CriticError, match="TYPESAFE_API_KEY"):
+        tc.TypeSafeFaceCheck()
+
+
 def test_claude_rewriter_sends_pictures_and_history(tc, spec) -> None:
     sent = {}
 

@@ -222,7 +222,16 @@ def test_the_labels_template_is_not_for_demonstrations(ce, tmp_path) -> None:
 
 
 def frames_args(source, out, **kwargs):
-    defaults = {"count": 3, "window_s": 1.0, "limit": None, "skip_face_check": False, "only": None}
+    defaults = {
+        "count": 3,
+        "window_s": 1.0,
+        "limit": None,
+        "skip_face_check": False,
+        "only": None,
+        "face_check": "opencv",  # the tests never reach the network unless one asks for it
+        "face_threshold": 0.3,
+        "yes": False,
+    }
     return args(task=TASK_FILE, source=source, out=out, **{**defaults, **kwargs})
 
 
@@ -259,6 +268,133 @@ def test_frames_drops_a_picture_set_with_a_face_and_blocks_the_sample(ce, tc, tm
     assert entry["sets"] == [] and entry["faces_skipped"] == 3
     assert "face" in entry["blocked"]
     assert not list((out / "frames").rglob("*.jpg"))  # nothing with a face was ever written
+
+
+class FakeFaceCheck:
+    """Stands in for tc.TypeSafeFaceCheck: remembers the pictures it was shown and flags by position. No network."""
+
+    shown: list[list[bytes]] = []
+    flag_by_position: list[bool] = []
+    fail = False
+
+    def __init__(self, threshold: float = 0.3) -> None:
+        self.threshold = threshold
+
+    def flags(self, jpegs):
+        type(self).shown.append(list(jpegs))
+        if type(self).fail:
+            raise type(self).error("TypeSafe could not be reached")
+        wanted = type(self).flag_by_position
+        return [wanted[i] if i < len(wanted) else False for i in range(len(jpegs))]  # unlisted pictures: no face
+
+
+@pytest.fixture
+def fake_face_check(tc, monkeypatch):
+    FakeFaceCheck.shown, FakeFaceCheck.flag_by_position, FakeFaceCheck.fail = [], [], False
+    FakeFaceCheck.error = tc.CriticError
+    monkeypatch.setattr(tc, "TypeSafeFaceCheck", FakeFaceCheck)
+    monkeypatch.setattr(tc, "count_faces", lambda image: 0)
+    return FakeFaceCheck
+
+
+def test_typesafe_drops_the_picture_sets_it_flags_and_sees_only_the_crops(ce, fake_face_check, tmp_path) -> None:
+    make_rollout(tmp_path / "eps", "run1")
+    fake_face_check.flag_by_position = [False, True, False]  # the middle one of three sets shows a face
+    out = tmp_path / "eval"
+    ce.command_frames(frames_args(tmp_path / "eps", out, face_check="both", yes=True))
+    entry = json.loads((out / "frames/index.json").read_text())[0]
+    assert entry["faces_skipped"] == 1 and entry["face_check"] == "both" and entry["blocked"] is None
+    assert [s["scene"].rsplit("_", 1)[1] for s in entry["sets"]] == ["0.jpg", "2.jpg"]
+    written = sorted(p.name for p in (out / "frames").rglob("*.jpg"))
+    assert written == ["scene_0.jpg", "scene_2.jpg", "strip_0.jpg", "strip_2.jpg"]  # nothing of the flagged set
+    # one request for the sample, holding the camera crop of each of its three sets and no zoomed strip
+    assert len(fake_face_check.shown) == 1 and len(fake_face_check.shown[0]) == 3
+    height, width = ce.decode_jpeg(fake_face_check.shown[0][0]).shape[:2]
+    assert max(height, width) < 600  # a crop of the table, not the 600 pixel strip
+
+
+def test_typesafe_is_not_shown_what_opencv_already_flagged(ce, tc, fake_face_check, tmp_path, monkeypatch) -> None:
+    make_rollout(tmp_path / "eps", "run1")
+    calls = iter([1, 0, 0])  # OpenCV flags the first of three sets
+    monkeypatch.setattr(tc, "count_faces", lambda image: next(calls))
+    out = tmp_path / "eval"
+    ce.command_frames(frames_args(tmp_path / "eps", out, face_check="both", yes=True))
+    entry = json.loads((out / "frames/index.json").read_text())[0]
+    assert len(fake_face_check.shown[0]) == 2  # only the two crops OpenCV let through
+    assert entry["faces_skipped"] == 1 and len(entry["sets"]) == 2
+
+
+def test_typesafe_only_skips_opencv(ce, tc, fake_face_check, tmp_path, monkeypatch) -> None:
+    def refuse(image):
+        raise AssertionError("--face-check typesafe must not run OpenCV's detector")
+
+    monkeypatch.setattr(tc, "count_faces", refuse)
+    make_rollout(tmp_path / "eps", "run1")
+    fake_face_check.flag_by_position = [False, False, False]
+    ce.command_frames(frames_args(tmp_path / "eps", tmp_path / "eval", face_check="typesafe", yes=True))
+    assert len(fake_face_check.shown[0]) == 3
+
+
+def test_a_sample_whose_every_set_typesafe_flags_is_blocked_and_writes_nothing(ce, fake_face_check, tmp_path) -> None:
+    make_rollout(tmp_path / "eps", "run1")
+    fake_face_check.flag_by_position = [True, True, True]
+    out = tmp_path / "eval"
+    ce.command_frames(frames_args(tmp_path / "eps", out, face_check="both", yes=True))
+    entry = json.loads((out / "frames/index.json").read_text())[0]
+    assert entry["sets"] == [] and entry["faces_skipped"] == 3 and "face" in entry["blocked"]
+    assert not list((out / "frames").rglob("*.jpg"))
+
+
+def test_a_failed_typesafe_check_is_an_error_and_keeps_nothing(ce, fake_face_check, tmp_path) -> None:
+    make_rollout(tmp_path / "eps", "run1")
+    fake_face_check.fail = True
+    out = tmp_path / "eval"
+    with pytest.raises(ce.EvalError, match="face check failed"):
+        ce.command_frames(frames_args(tmp_path / "eps", out, face_check="both", yes=True))
+    assert not list((out / "frames").rglob("*.jpg"))  # an unchecked picture is never kept
+
+
+def test_frames_asks_before_sending_crops_to_typesafe(ce, fake_face_check, tmp_path, monkeypatch) -> None:
+    make_rollout(tmp_path / "eps", "run1")
+    out = tmp_path / "eval"
+    with pytest.raises(ce.EvalError, match="no one to ask"):  # a test has no terminal
+        ce.command_frames(frames_args(tmp_path / "eps", out, face_check="both"))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "n")
+    with pytest.raises(ce.EvalError, match="not sent"):
+        ce.command_frames(frames_args(tmp_path / "eps", out, face_check="both"))
+    assert fake_face_check.shown == []  # nothing was shown to TypeSafe
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+    fake_face_check.flag_by_position = [False, False, False]
+    assert ce.command_frames(frames_args(tmp_path / "eps", out, face_check="both")) == 0
+
+
+def test_the_local_check_never_builds_the_typesafe_one(ce, tc, tmp_path, monkeypatch) -> None:
+    def refuse(*a, **k):
+        raise AssertionError("--face-check opencv must keep every picture on this computer")
+
+    monkeypatch.setattr(tc, "TypeSafeFaceCheck", refuse)
+    make_rollout(tmp_path / "eps", "run1")
+    assert ce.command_frames(frames_args(tmp_path / "eps", tmp_path / "eval", face_check="opencv")) == 0
+
+
+def test_typesafe_without_its_key_is_refused_before_anything_is_cut(ce, tc, tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    make_rollout(tmp_path / "eps", "run1")
+    with pytest.raises(tc.CriticError, match="TYPESAFE_API_KEY"):
+        ce.command_frames(frames_args(tmp_path / "eps", tmp_path / "eval", face_check="typesafe", yes=True))
+    assert not (tmp_path / "eval" / "frames" / "index.json").exists()
+
+
+def test_auto_adds_the_typesafe_check_only_when_its_key_is_set(ce, monkeypatch) -> None:
+    pick = lambda **k: ce.face_check_mode(args(skip_face_check=False, face_check="auto", **k))  # noqa: E731
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    assert pick() == "opencv"
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    assert pick() == "both"
+    assert ce.face_check_mode(args(skip_face_check=True, face_check="auto")) == "none"
+    assert ce.face_check_mode(args(skip_face_check=False, face_check="opencv")) == "opencv"
+    assert ce.face_check_mode(args(skip_face_check=False, face_check="typesafe")) == "typesafe"
 
 
 def test_frames_blocks_a_sample_without_the_scene_camera(ce, tmp_path) -> None:

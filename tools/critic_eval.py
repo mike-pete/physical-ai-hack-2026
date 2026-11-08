@@ -5,7 +5,8 @@ The workflow, in four steps. Run it in the repo's environment (`uv run`), not ~/
 ```
 # 1. After the recording runs (docs/critic_eval.md): a labels sheet to fill in, one row per episode.
 uv run python tools/critic_eval.py labels-template ~/hackathon_data/critic-eval/cables --out labels.csv
-# 2. Cut the pictures the critic will see, cropped as the task file says. Nothing is sent. LOOK at them.
+# 2. Cut the pictures the critic will see, cropped as the task file says. LOOK at them. Nothing is sent except, when
+#    TYPESAFE_API_KEY is set, the crops to TypeSafe for a face check (it asks first; --face-check opencv avoids it).
 uv run python tools/critic_eval.py frames ~/hackathon_data/critic-eval/cables --out eval
 # 3. Ask the critic. This sends the cropped pictures to TypeSafe (and Claude, for rewritten prompts): it asks first.
 uv run python tools/critic_eval.py run --out eval --variant typesafe
@@ -19,8 +20,10 @@ exact payloads in `eval/<variant>/requests.jsonl`. The same commands take the te
 its end (done), which need no labels sheet.
 
 What goes outside this computer is only what `frames` wrote: the crop of each camera's picture named in the task
-file (the scene camera also sees the people around the table). `frames` runs a face detector over every crop and
-drops the picture set when it finds one; that is a safety net, so look at the crops yourself before `run`.
+file (the scene camera also sees the people around the table). `frames` runs two face checks over every crop and
+drops the picture set when either finds one: OpenCV's detector (local, finds few faces) and, when TYPESAFE_API_KEY is
+set, a TypeSafe question (finds far more; it sends the crops to TypeSafe, after asking). Both are safety nets, so look
+at the crops yourself before `run`.
 """
 
 import argparse
@@ -213,11 +216,54 @@ def decode_jpeg(data: bytes) -> np.ndarray:
     return cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
 
 
+def face_check_mode(args: argparse.Namespace) -> str:
+    """Which face checks `frames` runs: "none", "opencv" (local), "typesafe" or "both" (opencv, then typesafe).
+
+    `auto` is "both" when TYPESAFE_API_KEY is set, and "opencv" when it is not.
+    """
+    if args.skip_face_check:
+        return "none"
+    if args.face_check == "auto":
+        return "both" if os.environ.get("TYPESAFE_API_KEY") else "opencv"
+    return args.face_check
+
+
+def confirm_face_check(args: argparse.Namespace, pictures: int) -> None:
+    """Says what the second face check sends and asks; refuses without a person to ask unless --yes."""
+    after_opencv = " and none that OpenCV's detector already flagged" if face_check_mode(args) == "both" else ""
+    print(
+        f"About to send up to {pictures} cropped pictures outside this computer, to check them for faces:\n"
+        f"  TypeSafe (api.typesafe.ai, model {tc.TYPESAFE_MODEL}): one question per picture, "
+        "'is a person's face visible?'; key from TYPESAFE_API_KEY\n"
+        f"Only the cameras' crops go, never the zoomed pictures{after_opencv}."
+    )
+    if args.yes:
+        return
+    if not sys.stdin.isatty():
+        raise EvalError("no one to ask: rerun with --yes to send the crops, or --face-check opencv to keep them here")
+    if input("Send? [y/N] ").strip().lower() not in ("y", "yes"):
+        raise EvalError("not sent")
+
+
 def command_frames(args: argparse.Namespace) -> int:
     spec = tc.load_task(args.task)
     samples = [s for s in discover(args.source, spec) if args.only in (None, s.at)]
     if args.limit:
         samples = samples[: args.limit]
+    mode = face_check_mode(args)
+    second: tc.TypeSafeFaceCheck | None = None
+    if mode in ("typesafe", "both"):
+        second = tc.TypeSafeFaceCheck(threshold=args.face_threshold)  # raises if TYPESAFE_API_KEY is not set
+        confirm_face_check(args, len(samples) * args.count * len(spec.cameras))
+    print(
+        {
+            "none": "face check: OFF (--skip-face-check)",
+            "opencv": "face check: OpenCV's detector only, nothing leaves this computer "
+            "(set TYPESAFE_API_KEY for a second check by TypeSafe, which finds far more faces)",
+            "typesafe": "face check: TypeSafe only",
+            "both": "face check: OpenCV's detector, then TypeSafe on the crops it lets through",
+        }[mode]
+    )
     folder = args.out / "frames"
     folder.mkdir(parents=True, exist_ok=True)
     index: list[dict[str, Any]] = []
@@ -233,6 +279,7 @@ def command_frames(args: argparse.Namespace) -> int:
             "auto_label": sample.auto_label,
             "sets": [],
             "faces_skipped": 0,
+            "face_check": mode,
             "blocked": None,
         }
         missing = [c for c in spec.cameras if c not in sample.videos]
@@ -240,14 +287,35 @@ def command_frames(args: argparse.Namespace) -> int:
             entry["blocked"] = f"no video for camera {missing}"
         else:
             raw = {c: read_frames(sample.videos[c], sample.at, args.count, args.window_s) for c in spec.cameras}
+            # The face checks run on the cameras' crops. A zoom lies inside its camera's crop (the task file checks
+            # that), so it shows nothing the crop does not, and a detector run on a few enlarged pixels only finds
+            # faces that are not there.
+            kept: list[tuple[int, dict[str, bytes]]] = []
             for k in range(min(len(v) for v in raw.values())):
                 prepared = {c: tc.prepare_image(raw[c][k], spec.crop.get(c)) for c in spec.cameras}
-                # The face check runs on the cameras' crops. A zoom lies inside its camera's crop (the task file
-                # checks that), so it shows nothing the crop does not, and a detector run on a few enlarged pixels
-                # only finds faces that are not there.
-                if not args.skip_face_check and any(tc.count_faces(decode_jpeg(j)) for j in prepared.values()):
+                if mode in ("opencv", "both") and any(tc.count_faces(decode_jpeg(j)) for j in prepared.values()):
                     entry["faces_skipped"] += 1
+                    totals["faces_opencv"] += 1
                     continue
+                kept.append((k, prepared))
+            if second is not None and kept:
+                # One batch for the sample, before anything is written: if the call fails nothing unchecked is kept.
+                try:
+                    flagged = second.flags([jpeg for _, prepared in kept for jpeg in prepared.values()])
+                except tc.CriticError as error:
+                    raise EvalError(f"the TypeSafe face check failed, so {sample.id} was not cut: {error}") from None
+                checked: list[tuple[int, dict[str, bytes]]] = []
+                position = 0
+                for k, prepared in kept:
+                    hits = flagged[position : position + len(prepared)]
+                    position += len(prepared)
+                    if any(hits):
+                        entry["faces_skipped"] += 1
+                        totals["faces_typesafe"] += 1
+                    else:
+                        checked.append((k, prepared))
+                kept = checked
+            for k, prepared in kept:
                 for name, view in spec.views.items():
                     prepared[name] = tc.prepare_image(raw[view.camera][k], view.box, target_side=view.max_side)
                 paths = {}
@@ -266,7 +334,9 @@ def command_frames(args: argparse.Namespace) -> int:
     (folder / "index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
     print(
         f"{len(index)} samples, {totals['sets']} picture sets written under {folder}\n"
-        f"  {totals['faces']} sets dropped because a face was found, {totals['blocked']} samples blocked\n"
+        f"  {totals['faces']} sets dropped because a face was found "
+        f"({totals['faces_opencv']} by OpenCV, {totals['faces_typesafe']} by TypeSafe), "
+        f"{totals['blocked']} samples blocked\n"
         "Look at the pictures before `run`: they are exactly what will be sent."
     )
     return 0
@@ -928,7 +998,11 @@ def parser() -> argparse.ArgumentParser:
     template.add_argument("--force", action="store_true", help="overwrite an existing file")
     template.set_defaults(handler=command_labels_template)
 
-    cut = commands.add_parser("frames", help="cut the cropped pictures the critic will see; sends nothing")
+    cut = commands.add_parser(
+        "frames",
+        help="cut the cropped pictures the critic will see; sends nothing, except the crops to TypeSafe for a "
+        "face check (when TYPESAFE_API_KEY is set, after asking)",
+    )
     cut.add_argument("source", type=pathlib.Path, help="rollout episodes, or a LeRobot dataset of demonstrations")
     cut.add_argument("--out", type=pathlib.Path, required=True, help="the evaluation folder")
     cut.add_argument("--count", type=int, default=5, help="pictures per sample, spread over the window (default 5)")
@@ -939,7 +1013,22 @@ def parser() -> argparse.ArgumentParser:
         help="only the start or only the end of each demonstration (a rollout's pictures are always its end)",
     )
     cut.add_argument("--limit", type=int, help="only the first N samples")
-    cut.add_argument("--skip-face-check", action="store_true", help="do not run the face detector (not advised)")
+    cut.add_argument("--skip-face-check", action="store_true", help="run no face check at all (not advised)")
+    cut.add_argument(
+        "--face-check",
+        choices=["auto", "opencv", "both", "typesafe"],
+        default="auto",
+        help="opencv: the local detector only; both: it, then TypeSafe on the crops it lets through; typesafe: "
+        "TypeSafe only; auto (default): both when TYPESAFE_API_KEY is set, else opencv. TypeSafe gets the crops, "
+        "after asking",
+    )
+    cut.add_argument(
+        "--face-threshold",
+        type=float,
+        default=tc.FACE_BLOCK_AT,
+        help=f"drop a crop when TypeSafe's chance of a face is at least this (default {tc.FACE_BLOCK_AT})",
+    )
+    cut.add_argument("--yes", action="store_true", help="do not ask before sending crops to TypeSafe")
     cut.set_defaults(handler=command_frames)
 
     ask = commands.add_parser("run", help="ask the critic about the cut pictures; sends them, after asking")
