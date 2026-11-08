@@ -113,7 +113,7 @@ def test_commands_are_ignored_while_a_run_goes(lw, tmp_path):
 
 def test_a_backend_failure_in_a_run_is_reported_as_an_error(lw, tmp_path):
     class Broken(lw.FakeBackend):
-        async def run(self, prompt, checkpoint, dry_run, stop):
+        async def run(self, prompt, checkpoint, dry_run, stop, ready):
             raise RuntimeError("the model refused")
 
     async def go():
@@ -199,3 +199,40 @@ def test_watch_makes_the_worker_emit_angles_only_while_watched(lw, tmp_path):
     assert before == 0 and sink.kinds().count("angles") >= 2
     angles = next(e for e in sink.events if e["event"] == "angles")["arms"]
     assert set(angles) == {"left", "right"} and len(angles["left"]["joints"]) == 7
+
+
+def test_the_recording_starts_only_when_the_model_is_ready(lw, tmp_path):
+    seen = []
+
+    class Slow(lw.FakeBackend):
+        async def run(self, prompt, checkpoint, dry_run, stop, ready):
+            seen.append(list((tmp_path / "run").glob("*.mp4")))  # the model is still loading: nothing recorded yet
+            ready()
+            await asyncio.sleep(0.3)
+
+    async def go():
+        sink = Sink()
+        worker = lw.Worker(Slow(), tmp_path / "frames", sink)
+        await worker._handle(run_command(tmp_path, seconds=5))
+        await worker._run_task
+        return sink
+
+    sink = asyncio.run(go())
+    assert seen == [[]] and sink.kinds().index("run_started") < sink.kinds().index("run_ended")
+
+
+def test_a_run_that_fails_before_the_model_is_ready_records_nothing(lw, tmp_path):
+    class Fails(lw.FakeBackend):
+        async def run(self, prompt, checkpoint, dry_run, stop, ready):
+            raise RuntimeError("the model's IK did not compile in time")
+
+    async def go():
+        sink = Sink()
+        worker = lw.Worker(Fails(), tmp_path / "frames", sink)
+        await worker._handle(run_command(tmp_path))
+        await worker._run_task
+        return sink
+
+    sink = asyncio.run(go())
+    assert "run_started" not in sink.kinds()
+    assert next(e for e in sink.events if e["event"] == "run_ended")["status"] == "error"

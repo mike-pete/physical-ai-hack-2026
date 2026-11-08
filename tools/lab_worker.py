@@ -41,6 +41,7 @@ import numpy as np
 STATION_CONFIG = "~/.dreamlabs/station.yaml"
 LIVE_FPS = 10
 LIVE_MAX_WIDTH = 640
+ENCODER_THREADS = 2
 RECORD_FPS = 30
 ## Where `shutdown` homes the arms before switching them off, seconds: slow, like the Home button.
 SHUTDOWN_HOME_S = 8.0
@@ -71,7 +72,9 @@ class Backend(Protocol):
     def angles(self) -> dict[str, Any]: ...
     def health(self) -> str: ...
     def arms_ok(self) -> bool: ...
-    async def run(self, prompt: str, checkpoint: str, dry_run: bool, stop: asyncio.Event) -> None: ...
+    async def run(
+        self, prompt: str, checkpoint: str, dry_run: bool, stop: asyncio.Event, ready: Callable[[], None]
+    ) -> None: ...
     def close(self) -> None: ...
 
 
@@ -332,8 +335,15 @@ class DreamBackend:
         if failed:
             raise RuntimeError("an arm may still be powered, support it: " + "; ".join(failed))
 
-    async def run(self, prompt: str, checkpoint: str, dry_run: bool, stop: asyncio.Event) -> None:
-        """One run of the loop on the open arms: no home move before it, none after it, no switch-off."""
+    async def run(
+        self, prompt: str, checkpoint: str, dry_run: bool, stop: asyncio.Event, ready: Callable[[], None]
+    ) -> None:
+        """One run of the loop on the open arms: no home move before it, none after it, no switch-off.
+
+        `ready` is called once the model is up and the loop is about to start: the recording begins there, not
+        earlier, because opening the model (its IK compiles) starves every other thread of the computer, and the arms'
+        own threads must not be among the starved while the encoders run too.
+        """
         from robots import control, errors
 
         run, followers = self._run, self._followers
@@ -350,6 +360,7 @@ class DreamBackend:
             if stop.is_set():
                 return
             await asyncio.to_thread(self._open_arms)
+            ready()
             arms = self.arms
             if dry_run:
                 arms = {
@@ -533,7 +544,10 @@ class FakeBackend:
     def arms_ok(self) -> bool:
         return True
 
-    async def run(self, prompt: str, checkpoint: str, dry_run: bool, stop: asyncio.Event) -> None:
+    async def run(
+        self, prompt: str, checkpoint: str, dry_run: bool, stop: asyncio.Event, ready: Callable[[], None]
+    ) -> None:
+        ready()
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(stop.wait(), timeout=8)
 
@@ -570,8 +584,10 @@ class Recorder:
         self._stop = threading.Event()
         self.error: str = ""
         self._thread = threading.Thread(target=self._run, name="lab-recorder", daemon=True)
+        self._started = False
 
     def start(self) -> None:
+        self._started = True
         self._thread.start()
 
     def _encoder(self, name: str, rgb: np.ndarray) -> tuple[Any, Any]:
@@ -579,6 +595,8 @@ class Recorder:
 
         container = av.open(str(self._dir / f"{name}.mp4"), "w")
         stream = container.add_stream("libx264", rate=RECORD_FPS)
+        with contextlib.suppress(Exception):
+            stream.codec_context.thread_count = ENCODER_THREADS  # three encoders must not take every core
         stream.width, stream.height = rgb.shape[1] // 2 * 2, rgb.shape[0] // 2 * 2
         stream.pix_fmt = "yuv420p"
         stream.options = {"preset": "veryfast", "crf": "18"}
@@ -616,7 +634,8 @@ class Recorder:
 
     def stop(self) -> None:
         self._stop.set()
-        self._thread.join(timeout=15)
+        if self._started:
+            self._thread.join(timeout=15)
 
 
 # ---------------------------------------------------------------------- the worker
@@ -741,10 +760,13 @@ class Worker:
         recorder = Recorder(out_dir, self.backend.frames)
         timer = asyncio.get_running_loop().call_later(float(command["max_seconds"]), time_is_up)
         self.set_state("running", "running")
-        try:
+
+        def ready() -> None:
             recorder.start()
             self.emit(event="run_started", run_id=run_id)
-            await self.backend.run(command["prompt"], command["checkpoint"], bool(command["dry_run"]), stop)
+
+        try:
+            await self.backend.run(command["prompt"], command["checkpoint"], bool(command["dry_run"]), stop, ready)
             if stop.is_set() and not timed_out:
                 status = "stopped"
         except Exception as exc:
