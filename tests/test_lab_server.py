@@ -286,3 +286,66 @@ def test_kernel_events_degrade_to_an_error_when_journalctl_is_missing(rig, monke
     monkeypatch.setattr(lab.subprocess, "run", missing)
     result = the_lab.kernel_usb_events()
     assert result["count"] == 0 and "FileNotFoundError" in result["error"]
+
+
+def start_sequence(the_lab, port, dry_run=True):
+    one, two = the_lab.store.add_prompt("first task")["id"], the_lab.store.add_prompt("second task")["id"]
+    steps = [{"prompt_id": one, "seconds": 20}, {"prompt_id": two, "seconds": 40}]
+    assert post(port, "/api/sequences", {"name": "pair", "steps": steps})[0] == 200
+    sequence_id = the_lab.store.sequences()[0]["id"]
+    the_lab.on_event({"event": "state", "state": "holding"})
+    assert post(port, f"/api/sequences/{sequence_id}/run", {"dry_run": dry_run})[0] == 200
+    return sequence_id
+
+
+def finish(the_lab, status):
+    run_id = the_lab.worker.sent[-1]["run_id"]
+    the_lab.on_event({"event": "run_ended", "run_id": run_id, "status": status})
+    the_lab.on_event({"event": "state", "state": "holding"})
+
+
+def test_a_sequence_runs_each_step_for_its_time_then_ends(rig):
+    the_lab, port = rig
+    start_sequence(the_lab, port)
+    first = the_lab.worker.sent[-1]
+    assert first["prompt"] == "first task" and first["max_seconds"] == 20 and first["dry_run"] is True
+    assert the_lab.status()["sequence"] == {"name": "pair", "step": 1, "steps": 2}
+    finish(the_lab, "finished")
+    second = the_lab.worker.sent[-1]
+    assert second["prompt"] == "second task" and second["max_seconds"] == 40 and second["run_id"] != first["run_id"]
+    assert the_lab.status()["sequence"]["step"] == 2
+    assert post(port, "/api/sequences/1/run")[0] == 409  # one at a time
+    finish(the_lab, "finished")
+    assert the_lab.status()["sequence"] is None and len(the_lab.worker.sent) == 2
+    assert [r["status"] for r in the_lab.store.runs()] == ["finished", "finished"]
+
+
+@pytest.mark.parametrize("status", ["stopped", "error"])
+def test_a_stop_or_an_error_ends_the_whole_sequence(rig, status):
+    the_lab, port = rig
+    start_sequence(the_lab, port)
+    finish(the_lab, status)
+    assert the_lab.status()["sequence"] is None and len(the_lab.worker.sent) == 1
+    assert "pair" in the_lab.status()["alert"]["text"] or "first task" in the_lab.status()["alert"]["text"]
+
+
+def test_a_sequence_needs_held_arms_and_leaves_nothing_behind_when_refused(rig):
+    the_lab, port = rig
+    prompt_id = add_prompt(the_lab)
+    post(port, "/api/sequences", {"name": "one", "steps": [{"prompt_id": prompt_id, "seconds": 10}]})
+    status, body = post(port, "/api/sequences/1/run")
+    assert status == 409 and "Hold here" in body["error"]
+    assert the_lab.status()["sequence"] is None and the_lab.store.runs() == []
+    assert post(port, "/api/sequences", {"name": "", "steps": []})[0] == 400
+
+
+def test_sequences_can_be_listed_edited_and_deleted(rig):
+    the_lab, port = rig
+    prompt_id = add_prompt(the_lab)
+    steps = [{"prompt_id": prompt_id, "seconds": 10}]
+    post(port, "/api/sequences", {"name": "one", "steps": steps})
+    assert json.loads(get(port, "/api/sequences")[2])[0]["name"] == "one"
+    assert post(port, "/api/sequences/1", {"name": "two", "steps": steps})[0] == 200
+    assert the_lab.store.sequence(1)["name"] == "two"
+    assert post(port, "/api/sequences/1/delete")[0] == 200
+    assert post(port, "/api/sequences/1/delete")[0] == 400

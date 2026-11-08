@@ -71,6 +71,7 @@
     <h1>Prompt Lab</h1>
     <nav>
       <button class="tab on" id="tab-prompts" data-tab="prompts">Prompts</button>
+      <button class="tab" id="tab-sequences" data-tab="sequences">Sequences</button>
       <button class="tab" id="tab-runs" data-tab="runs">Runs</button>
       <button class="tab" id="tab-motors" data-tab="motors">Motors</button>
       <button class="tab" id="tab-can" data-tab="can">CAN</button>
@@ -107,6 +108,15 @@
       <span class="muted">Weightless, place both arms, Hold here, then Run. A run starts from where the arms are.</span>
     </div>
     <div id="prompts" class="row" style="display:grid;gap:12px"></div>
+  </section>
+
+  <section id="view-sequences" hidden>
+    <div class="row" style="margin-bottom:10px">
+      <button id="add-seq" class="primary">+ New sequence</button>
+      <span class="muted">Each step runs its prompt for its time, then the next step starts from where the arms are.
+        Stop ends the whole sequence. Each step is its own run in the Runs tab.</span>
+    </div>
+    <div id="sequences" class="row" style="display:grid;gap:12px"></div>
   </section>
 
   <section id="view-motors" hidden>
@@ -194,11 +204,12 @@ $('confirm-no').onclick = () => { pending = null; $('confirm').hidden = true; };
 $('confirm-yes').onclick = () => { const a = pending; pending = null; $('confirm').hidden = true; if (a) a(); };
 
 function show(tab) {
-  for (const t of ['prompts', 'runs', 'motors', 'can']) {
+  for (const t of ['prompts', 'sequences', 'runs', 'motors', 'can']) {
     $('view-' + t).hidden = t !== tab;
     $('tab-' + t).classList.toggle('on', t === tab);
   }
   if (tab === 'runs') loadRuns();
+  if (tab === 'sequences') loadSequences();
   motorsOn = tab === 'motors';
   if (motorsOn) pollMotors();
   canOn = tab === 'can';
@@ -327,6 +338,7 @@ function renderStatus() {
     now.hidden = false;
     now.textContent = (s.run.dry_run ? '[dry run] ' : '') + 'Run ' + s.run.id + ' · ' + s.run.elapsed_s + ' s of '
       + s.run.max_seconds + ' s · ' + s.run.checkpoint + '\n' + s.run.prompt;
+    if (s.sequence) now.textContent = 'Sequence ' + s.sequence.name + ', step ' + s.sequence.step + ' of ' + s.sequence.steps + '\n' + now.textContent;
   } else now.hidden = true;
   if (st !== 'running' && !$('msg').className.includes('err') && s.message) say(s.message, false);
   const key = s.cameras.join(',');
@@ -339,7 +351,7 @@ function renderStatus() {
       d.append(img, label); return d;
     }));
   }
-  document.querySelectorAll('#prompts button.run').forEach((b) => (b.disabled = st !== 'holding'));
+  document.querySelectorAll('#prompts button.run, #sequences button.run').forEach((b) => (b.disabled = st !== 'holding'));
 }
 
 async function refresh() {
@@ -395,6 +407,71 @@ function card(p) {
 $('add').onclick = async () => {
   const r = await post('/api/prompts', { text: 'Describe the task in plain words.' });
   if (r.ok) loadPrompts();
+};
+
+// ---- sequences
+let promptList = [];
+async function loadSequences() {
+  promptList = await (await fetch('/api/prompts')).json();
+  const list = await (await fetch('/api/sequences')).json();
+  const box = $('sequences'); box.replaceChildren();
+  if (!list.length) { const p = document.createElement('div'); p.className = 'muted'; p.textContent = 'No sequences yet: press + New sequence.'; box.append(p); }
+  for (const q of list) box.append(sequenceCard(q));
+  renderStatus();
+}
+function stepRow(step, onRemove) {
+  const row = document.createElement('div'); row.className = 'row step';
+  const pick = document.createElement('select'); pick.style.flex = '1';
+  for (const p of promptList) {
+    const o = document.createElement('option'); o.value = p.id; o.textContent = p.text.length > 90 ? p.text.slice(0, 90) + '…' : p.text;
+    if (p.id === step.prompt_id) o.selected = true; pick.append(o);
+  }
+  const secs = document.createElement('input'); secs.type = 'number'; secs.min = 5; secs.max = 3600; secs.value = step.seconds ?? 60; secs.style.width = '5em';
+  const unit = document.createElement('span'); unit.className = 'muted'; unit.textContent = 'seconds';
+  const up = Object.assign(document.createElement('button'), { textContent: '↑' });
+  const down = Object.assign(document.createElement('button'), { textContent: '↓' });
+  const x = Object.assign(document.createElement('button'), { textContent: 'Remove' });
+  up.onclick = () => row.previousElementSibling?.classList.contains('step') && row.previousElementSibling.before(row);
+  down.onclick = () => row.nextElementSibling?.classList.contains('step') && row.nextElementSibling.after(row);
+  x.onclick = () => { row.remove(); onRemove(); };
+  row.append(pick, secs, unit, up, down, x);
+  row.read = () => ({ prompt_id: Number(pick.value), seconds: Number(secs.value) });
+  return row;
+}
+function sequenceCard(q) {
+  const el = document.createElement('div'); el.className = 'panel'; el.style.margin = 0;
+  const name = document.createElement('input'); name.type = 'text'; name.value = q.name; name.placeholder = 'name';
+  const steps = document.createElement('div'); steps.style.cssText = 'display:grid;gap:6px;margin:8px 0';
+  const empty = document.createElement('div'); empty.className = 'muted';
+  const sync = () => { empty.textContent = steps.children.length ? '' : 'No steps: add one.'; };
+  for (const step of q.steps) steps.append(stepRow(step, sync));
+  const add = Object.assign(document.createElement('button'), { textContent: '+ Step' });
+  add.onclick = () => {
+    if (!promptList.length) return alertShow('Add a prompt first: a step runs a saved prompt.');
+    steps.append(stepRow({ prompt_id: promptList[0].id, seconds: 60 }, sync)); sync();
+  };
+  const dry = document.createElement('input'); dry.type = 'checkbox';
+  const dryLabel = document.createElement('label'); dryLabel.append(dry, ' Dry run');
+  const run = Object.assign(document.createElement('button'), { textContent: 'Run sequence', className: 'primary run' });
+  const save = Object.assign(document.createElement('button'), { textContent: 'Save' });
+  const del = Object.assign(document.createElement('button'), { textContent: 'Delete', className: 'danger' });
+  const body = () => ({ name: name.value, steps: [...steps.querySelectorAll('.step')].map((r) => r.read()) });
+  run.onclick = () => {
+    const go = async () => { const r = await post('/api/sequences/' + q.id, body()); if (r.ok) await post('/api/sequences/' + q.id + '/run', { dry_run: dry.checked }); };
+    dry.checked ? go() : ask('The arms will move through every step. Hand on the emergency stop, everyone clear. Run it?', go);
+  };
+  save.onclick = async () => { const r = await post('/api/sequences/' + q.id, body()); if (r.ok) loadSequences(); };
+  del.onclick = () => ask('Delete this sequence? Its past runs stay.', async () => { await post('/api/sequences/' + q.id + '/delete'); loadSequences(); });
+  const actions = document.createElement('div'); actions.className = 'row'; actions.append(run, save, del, dryLabel);
+  el.append(name, steps, empty, add, document.createElement('hr'), actions);
+  sync();
+  return el;
+}
+$('add-seq').onclick = async () => {
+  if (!promptList.length) promptList = await (await fetch('/api/prompts')).json();
+  if (!promptList.length) return alertShow('Add a prompt first: a step runs a saved prompt.');
+  const r = await post('/api/sequences', { name: 'New sequence', steps: [{ prompt_id: promptList[0].id, seconds: 60 }] });
+  if (r.ok) loadSequences();
 };
 
 // ---- runs

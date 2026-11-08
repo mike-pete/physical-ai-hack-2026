@@ -66,6 +66,7 @@ _LOOPBACK_HOST = re.compile(r"(localhost|127\.0\.0\.1|\[::1\])(:\d{1,5})?")
 _CAMERA_PATH = re.compile(r"/api/camera/([a-z0-9_]{1,40})\.jpg")
 _VIDEO_PATH = re.compile(r"/api/runs/(\d+)/video/([a-z0-9_]{1,40})\.mp4")
 _PROMPT_PATH = re.compile(r"/api/prompts/(\d+)(?:/(delete|run))?")
+_SEQUENCE_PATH = re.compile(r"/api/sequences/(\d+)(?:/(delete|run))?")
 _RANGE = re.compile(r"bytes=(\d*)-(\d*)")
 ## Sent with every action by the page; a form on another site cannot add a header like it.
 ACTION_HEADER = "X-Lab-Dashboard"
@@ -170,6 +171,8 @@ class Lab:
         self.alerts: list[dict[str, Any]] = []  # what went wrong, newest last; the page shows them until dismissed
         self._alerts = 0
         self._timer: threading.Timer | None = None
+        # The sequence being played: {name, steps, step (0-based), dry_run, advance}; None when there is none.
+        self.sequence: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------ worker events
 
@@ -183,6 +186,8 @@ class Lab:
                 self._set("idle", "ready")
             elif kind == "state" and event.get("state") in STATES:
                 self._set(event["state"], str(event.get("message") or ""))
+                if event["state"] == "holding":
+                    self._advance_sequence()
             elif kind == "run_started":
                 self._run_started = time.monotonic()
                 self._arm_timer()
@@ -219,12 +224,79 @@ class Lab:
             self._timer.cancel()
             self._timer = None
         if self.run is not None:
+            self._step_ended(status)
             if status == "error":
                 self._alert(
                     f"Run {self.run['id']} failed ({self.run['prompt_text'][:80]!r}): {error or 'unknown error'}"
                 )
             self.store.end_run(self.run["id"], status if status in lab_db.RUN_STATUSES else "error", error)
             self.run = None
+
+    def _step_ended(self, status: str) -> None:
+        """A run ended: a sequence goes on only when its step ran out its time, and otherwise is over."""
+        sequence = self.sequence
+        if sequence is None:
+            return
+        if status == "finished":
+            sequence["advance"] = True
+            return
+        self.sequence = None
+        if status == "stopped":
+            self._alert(
+                f"Sequence {sequence['name']!r} stopped at step {sequence['step'] + 1} of {len(sequence['steps'])}."
+            )
+
+    def _advance_sequence(self) -> None:
+        """Once the arms hold after a finished step, starts the next one."""
+        sequence = self.sequence
+        if sequence is None or not sequence.get("advance"):
+            return
+        sequence["advance"] = False
+        sequence["step"] += 1
+        if sequence["step"] >= len(sequence["steps"]):
+            self.sequence = None
+            self.message = f"Sequence {sequence['name']!r} is done."
+            return
+        try:
+            self._start_step()
+        except lab_db.LabError as error:
+            self.sequence = None
+            self._alert(f"Sequence {sequence['name']!r} stopped before step {sequence['step'] + 1}: {error}")
+
+    def _start_step(self) -> None:
+        sequence = self.sequence
+        if sequence is None:
+            return
+        step = sequence["steps"][sequence["step"]]
+        self.run_prompt(step["prompt_id"], sequence["dry_run"], step["seconds"])
+
+    def run_sequence(self, sequence_id: int, dry_run: bool) -> str:
+        """Runs a saved sequence: each step's prompt for its time, one after another, the arms holding between.
+
+        A stop, an error, or a step that cannot start ends the whole sequence.
+
+        @throws LabBusy The arms are not holding a pose, or a sequence is already playing.
+        @throws lab_db.LabError The sequence is gone or empty, or its first step cannot start.
+        """
+        with self.lock:
+            sequence = self.store.sequence(sequence_id)
+            if not sequence["steps"]:
+                raise lab_db.LabError("this sequence has no steps")
+            if self.sequence is not None:
+                raise LabBusy("a sequence is already playing")
+            self.sequence = {
+                "name": sequence["name"],
+                "steps": sequence["steps"],
+                "step": 0,
+                "dry_run": dry_run,
+                "advance": False,
+            }
+            try:
+                self._start_step()
+            except lab_db.LabError:
+                self.sequence = None
+                raise
+            return f"Running sequence {sequence['name']!r}."
 
     def _arm_timer(self) -> None:
         if self._timer is not None:
@@ -345,6 +417,13 @@ class Lab:
                 "message": self.message,
                 "alert": self.alerts[-1] if self.alerts else None,
                 "alerts": list(self.alerts),
+                "sequence": None
+                if self.sequence is None
+                else {
+                    "name": self.sequence["name"],
+                    "step": self.sequence["step"] + 1,
+                    "steps": len(self.sequence["steps"]),
+                },
                 "cameras": list(self.cameras),
                 "run": None
                 if run is None
@@ -415,6 +494,8 @@ def make_handler(lab: Lab) -> type[http.server.BaseHTTPRequestHandler]:
                     return self._json(lab.watch_angles())
                 if path == "/api/prompts":
                     return self._json(lab.store.prompts())
+                if path == "/api/sequences":
+                    return self._json(lab.store.sequences())
                 if path == "/api/runs":
                     return self._json(lab.store.runs())
                 match = _CAMERA_PATH.fullmatch(path)
@@ -527,6 +608,22 @@ def make_handler(lab: Lab) -> type[http.server.BaseHTTPRequestHandler]:
                     return lab.run_prompt(prompt_id, dry_run, body.get("max_seconds"))
                 lab.store.update_prompt(prompt_id, body.get("text"), body.get("checkpoint"))
                 return "Prompt saved."
+            if path == "/api/sequences":
+                lab.store.add_sequence(body.get("name"), body.get("steps"))
+                return "Sequence added."
+            match = _SEQUENCE_PATH.fullmatch(path)
+            if match:
+                sequence_id, action = int(match.group(1)), match.group(2)
+                if action == "delete":
+                    lab.store.delete_sequence(sequence_id)
+                    return "Sequence deleted."
+                if action == "run":
+                    dry_run = body.get("dry_run", False)
+                    if not isinstance(dry_run, bool):
+                        raise lab_db.LabError("dry_run is true or false")
+                    return lab.run_sequence(sequence_id, dry_run)
+                lab.store.update_sequence(sequence_id, body.get("name"), body.get("steps"))
+                return "Sequence saved."
             commands = {
                 "/api/arms/weightless": "weightless",
                 "/api/arms/hold": "hold",

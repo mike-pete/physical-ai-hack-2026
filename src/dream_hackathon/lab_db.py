@@ -9,6 +9,7 @@ nothing.
 
 import contextlib
 import datetime
+import json
 import pathlib
 import sqlite3
 from collections.abc import Iterator
@@ -21,6 +22,8 @@ PROMPT_MAX_CHARS = 4000
 CHECKPOINT_MAX_CHARS = 200
 MAX_SECONDS_LIMIT = 3600
 RUN_STATUSES = ("running", "finished", "stopped", "error")
+SEQUENCE_NAME_MAX_CHARS = 100
+SEQUENCE_MAX_STEPS = 20
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS prompts (
@@ -41,6 +44,12 @@ CREATE TABLE IF NOT EXISTS runs (
     status      TEXT NOT NULL,
     error       TEXT NOT NULL DEFAULT '',
     dir         TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sequences (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    steps      TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 """
 
@@ -92,6 +101,18 @@ def clean_max_seconds(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 5 <= value <= MAX_SECONDS_LIMIT:
         raise LabError(f"a run lasts 5 to {MAX_SECONDS_LIMIT} seconds")
     return value
+
+
+def clean_name(value: object) -> str:
+    """A sequence's name, trimmed.
+
+    @throws LabError It is not text, is empty, or is longer than SEQUENCE_NAME_MAX_CHARS.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise LabError("name the sequence first")
+    if len(value.strip()) > SEQUENCE_NAME_MAX_CHARS:
+        raise LabError(f"a name can be at most {SEQUENCE_NAME_MAX_CHARS} characters")
+    return value.strip()
 
 
 class Store:
@@ -153,6 +174,11 @@ class Store:
             self._prompt(db, prompt_id)
             db.execute("DELETE FROM prompts WHERE id = ?", (prompt_id,))
             db.execute("UPDATE runs SET prompt_id = NULL WHERE prompt_id = ?", (prompt_id,))
+            for row in db.execute("SELECT id, steps FROM sequences").fetchall():
+                steps = json.loads(row["steps"])
+                kept = [step for step in steps if step["prompt_id"] != prompt_id]
+                if len(kept) != len(steps):  # a sequence loses the steps of a deleted prompt
+                    db.execute("UPDATE sequences SET steps = ? WHERE id = ?", (json.dumps(kept), row["id"]))
 
     def prompts(self) -> list[dict[str, Any]]:
         """Every prompt, oldest first."""
@@ -173,6 +199,78 @@ class Store:
         if row is None:
             raise LabError("there is no such prompt")
         return dict(row)
+
+    # ------------------------------------------------------------------ sequences
+
+    def _clean_steps(self, db: sqlite3.Connection, steps: object) -> list[dict[str, int]]:
+        if not isinstance(steps, list) or not 1 <= len(steps) <= SEQUENCE_MAX_STEPS:
+            raise LabError(f"a sequence has 1 to {SEQUENCE_MAX_STEPS} steps")
+        clean = []
+        for step in steps:
+            prompt_id = step.get("prompt_id") if isinstance(step, dict) else None
+            if isinstance(prompt_id, bool) or not isinstance(prompt_id, int):
+                raise LabError("every step needs a prompt")
+            self._prompt(db, prompt_id)
+            clean.append({"prompt_id": prompt_id, "seconds": clean_max_seconds(step.get("seconds"))})
+        return clean
+
+    def add_sequence(self, name: object, steps: object) -> dict[str, Any]:
+        """Saves a sequence: prompts to run one after another, each for its own time.
+
+        @throws LabError The name or a step is not acceptable.
+        """
+        name = clean_name(name)
+        with self._db() as db:
+            clean = self._clean_steps(db, steps)
+            cursor = db.execute(
+                "INSERT INTO sequences (name, steps, created_at) VALUES (?, ?, ?)", (name, json.dumps(clean), now())
+            )
+            return self._sequence(db, cursor.lastrowid)
+
+    def update_sequence(self, sequence_id: int, name: object, steps: object) -> dict[str, Any]:
+        """Replaces a sequence's name and steps.
+
+        @throws LabError There is no such sequence, or the name or a step is not acceptable.
+        """
+        name = clean_name(name)
+        with self._db() as db:
+            self._sequence(db, sequence_id)
+            clean = self._clean_steps(db, steps)
+            db.execute("UPDATE sequences SET name = ?, steps = ? WHERE id = ?", (name, json.dumps(clean), sequence_id))
+            return self._sequence(db, sequence_id)
+
+    def delete_sequence(self, sequence_id: int) -> None:
+        """Deletes a sequence; the runs it made stay.
+
+        @throws LabError There is no such sequence.
+        """
+        with self._db() as db:
+            self._sequence(db, sequence_id)
+            db.execute("DELETE FROM sequences WHERE id = ?", (sequence_id,))
+
+    def sequences(self) -> list[dict[str, Any]]:
+        """Every sequence, oldest first."""
+        with self._db() as db:
+            return [self._sequence(db, row["id"]) for row in db.execute("SELECT id FROM sequences ORDER BY id")]
+
+    def sequence(self, sequence_id: int) -> dict[str, Any]:
+        """One sequence.
+
+        @throws LabError There is no such sequence.
+        """
+        with self._db() as db:
+            return self._sequence(db, sequence_id)
+
+    @staticmethod
+    def _sequence(db: sqlite3.Connection, sequence_id: int | None) -> dict[str, Any]:
+        row = db.execute("SELECT * FROM sequences WHERE id = ?", (sequence_id,)).fetchone()
+        if row is None:
+            raise LabError("there is no such sequence")
+        steps = []
+        for step in json.loads(row["steps"]):
+            prompt = db.execute("SELECT text FROM prompts WHERE id = ?", (step["prompt_id"],)).fetchone()
+            steps.append({**step, "text": prompt["text"] if prompt else ""})
+        return {"id": row["id"], "name": row["name"], "steps": steps, "created_at": row["created_at"]}
 
     # ------------------------------------------------------------------ runs
 

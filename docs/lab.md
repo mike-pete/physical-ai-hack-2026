@@ -63,3 +63,7 @@ An arm refused to open because its gripper motor latched a fault (13 is "lost co
 ## The worker's log
 
 `~/hackathon_data/lab/worker.log` holds the arm worker's log with timestamps, Dream's arm threads included (a line like `arm 'left': latched down: ...` says why an arm stopped). It is appended to, never cleared.
+
+## Sequences
+
+The Sequences tab chains saved prompts: each step is a prompt and a time in seconds (5 to 3600). Press Run sequence with the arms holding a pose. Step 1 runs for its time, the arms hold where they are, then step 2 starts from there, and so on. Each step is its own run in the Runs tab, with its own videos. Stop, an error or a step that cannot start ends the whole sequence (an alert says at which step). Deleting a prompt removes its steps from every sequence. Between steps the model reopens, which takes a few seconds with the arms holding.

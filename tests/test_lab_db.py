@@ -65,3 +65,37 @@ def test_a_run_left_running_by_a_dead_server_is_closed_as_an_error(tmp_path):
     assert again.close_unfinished() == 1
     assert again.run(run["id"])["status"] == "error"
     assert again.close_unfinished() == 0
+
+
+def test_a_sequence_keeps_its_steps_and_loses_those_of_a_deleted_prompt(store):
+    a, b = store.add_prompt("pick up the cube"), store.add_prompt("put it down")
+    sequence = store.add_sequence("  cube  ", [{"prompt_id": a["id"], "seconds": 30}, {"prompt_id": b["id"]}])
+    assert sequence["name"] == "cube"
+    assert [(s["prompt_id"], s["seconds"], s["text"]) for s in sequence["steps"]] == [
+        (a["id"], 30, "pick up the cube"),
+        (b["id"], lab_db.DEFAULT_MAX_SECONDS, "put it down"),
+    ]
+    store.update_sequence(sequence["id"], "cube 2", [{"prompt_id": b["id"], "seconds": 10}])
+    assert store.sequence(sequence["id"])["name"] == "cube 2"
+    store.delete_prompt(b["id"])
+    assert store.sequence(sequence["id"])["steps"] == []
+    store.delete_sequence(sequence["id"])
+    assert store.sequences() == []
+
+
+@pytest.mark.parametrize(
+    ("name", "steps"),
+    [
+        ("", [{"prompt_id": 1, "seconds": 30}]),
+        ("x", []),
+        ("x", "no"),
+        ("x", [{"prompt_id": 99, "seconds": 30}]),
+        ("x", [{"prompt_id": 1, "seconds": 2}]),
+        ("x", [{"prompt_id": True, "seconds": 30}]),
+        ("x", [{"prompt_id": 1, "seconds": 30}] * (lab_db.SEQUENCE_MAX_STEPS + 1)),
+    ],
+)
+def test_a_bad_sequence_is_refused(store, name, steps):
+    store.add_prompt("pick up the cube")
+    with pytest.raises(lab_db.LabError):
+        store.add_sequence(name, steps)
