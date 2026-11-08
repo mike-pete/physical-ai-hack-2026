@@ -44,6 +44,9 @@
   .muted { color: var(--muted); }
   #msg { min-height: 1.4em; }
   #msg.err { color: var(--bad); }
+  #alert { display: flex; gap: 12px; align-items: flex-start; margin: 0 0 12px; padding: 10px 14px; border-radius: 8px;
+    border: 2px solid var(--bad); background: color-mix(in srgb, var(--bad) 12%, var(--bg, transparent)); }
+  #alert b { color: var(--bad); } #alert span { flex: 1; white-space: pre-wrap; overflow-wrap: anywhere; }
   .now { margin-top: 10px; padding: 10px; border: 1px dashed var(--line); border-radius: 8px; white-space: pre-wrap; }
   textarea, input[type=text], input[type=number] {
     font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
@@ -71,6 +74,8 @@
     </nav>
     <button id="home-link" title="Back to the prompts page">Home</button>
   </header>
+
+  <div id="alert" role="alert" hidden><span id="alert-text"></span><button id="alert-x">Dismiss</button></div>
 
   <section class="panel" id="live">
     <div class="row" style="margin-bottom:10px">
@@ -129,9 +134,16 @@ async function post(path, body) {
   const res = await fetch(path, { method: 'POST', headers: HEADERS, body: JSON.stringify(body || {}) });
   const data = await res.json().catch(() => ({ ok: false, error: 'bad reply' }));
   say(data.ok ? data.message : data.error, !data.ok);
+  if (!data.ok) alertShow('Refused: ' + (data.error || 'unknown error'));
   refresh();
   return data;
 }
+let alertSeen = 0;
+function alertShow(text, id) {
+  $('alert-text').textContent = text; $('alert').hidden = false;
+  if (id) alertSeen = id;
+}
+$('alert-x').onclick = () => { $('alert').hidden = true; };
 function say(text, err) { const m = $('msg'); m.textContent = text || ''; m.className = 'grow ' + (err ? 'err' : 'muted'); }
 
 function ask(text, action) {
@@ -153,9 +165,9 @@ document.querySelectorAll('.tab').forEach((b) => (b.onclick = () => show(b.datas
 $('home-link').onclick = () => { closePlayer(); show('prompts'); window.scrollTo(0, 0); };
 
 // ---- arm controls
-$('b-weightless').onclick = () => ask('Both arms go weightless. Support them with a hand first.', () => post('/api/arms/weightless'));
+$('b-weightless').onclick = () => post('/api/arms/weightless');
 $('b-hold').onclick = () => post('/api/arms/hold');
-$('b-home').onclick = () => ask('Both arms move slowly to home. Keep clear of them.', () => post('/api/arms/home'));
+$('b-home').onclick = () => post('/api/arms/home');
 $('b-off').onclick = () => ask('The arms park at rest and switch off. Support them.', () => post('/api/arms/power_off'));
 $('b-stop').onclick = () => post('/api/stop');
 
@@ -167,6 +179,7 @@ function renderStatus() {
   $('b-home').disabled = !['idle', 'holding', 'weightless'].includes(st);
   $('b-off').disabled = !['holding', 'weightless'].includes(st);
   $('b-stop').disabled = st !== 'running';
+  if (s.alert && s.alert.id !== alertSeen) alertShow(s.alert.text, s.alert.id);
   const now = $('now');
   if (s.run) {
     now.hidden = false;
@@ -189,7 +202,7 @@ function renderStatus() {
 
 async function refresh() {
   try { status = await (await fetch('/api/status')).json(); renderStatus(); }
-  catch (e) { say('lost the connection to the server', true); }
+  catch (e) { say('lost the connection to the server', true); alertShow('Lost the connection to the dhk-lab server. Is it still running?'); }
 }
 function pollCameras() {
   document.querySelectorAll('#cams img').forEach((img) => {
@@ -250,7 +263,7 @@ async function loadRuns() {
   $('runs-empty').hidden = runs.length > 0;
   $('runs').replaceChildren(...runs.map((r) => {
     const tr = document.createElement('tr'); tr.className = 'pick';
-    const cells = [r.id, fmt(r.started_at), (r.dry_run ? '[dry] ' : '') + r.prompt_text, r.status, length(r)];
+    const cells = [r.id, fmt(r.started_at), (r.dry_run ? '[dry] ' : '') + r.prompt_text, r.status + (r.error ? ': ' + r.error : ''), length(r)];
     cells.forEach((c, i) => { const td = document.createElement('td'); td.textContent = c; if (i === 3) td.className = 'st-' + r.status; tr.append(td); });
     tr.onclick = () => openPlayer(r);
     return tr;

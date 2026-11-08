@@ -233,3 +233,20 @@ def test_a_run_video_is_served_with_ranges(rig):
     assert get(port, path, {"Host": f"localhost:{port}", "Range": "bytes=500-"})[0] == 416
     assert get(port, f"/api/runs/{run['id']}/video/nothing.mp4")[0] == 404
     assert get(port, "/api/runs/999/video/overhead.mp4")[0] == 404
+
+
+def test_a_failed_run_raises_an_alert_the_page_can_show(rig):
+    the_lab, port = rig
+    the_lab.on_event({"event": "state", "state": "holding"})
+    assert the_lab.status()["alert"] is None
+    prompt_id = add_prompt(the_lab)
+    post(port, f"/api/prompts/{prompt_id}/run")
+    run_id = the_lab.worker.sent[-1]["run_id"]
+    the_lab.on_event(
+        {"event": "run_ended", "run_id": run_id, "status": "error", "error": "ValueError: prompt rejected"}
+    )
+    alert = the_lab.status()["alert"]
+    assert "prompt rejected" in alert["text"] and "open the drawer" in alert["text"]
+    the_lab.on_event({"event": "error", "message": "shutdown failed"})
+    assert the_lab.status()["alert"]["id"] > alert["id"]
+    assert get(port, "/api/status")[0] == 200

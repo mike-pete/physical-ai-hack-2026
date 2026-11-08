@@ -161,6 +161,8 @@ class Lab:
         self.cameras: list[str] = []
         self.run: dict[str, Any] | None = None
         self._run_started = 0.0
+        self.alert: dict[str, Any] | None = None  # the last thing that went wrong; the page shows it until dismissed
+        self._alerts = 0
         self._timer: threading.Timer | None = None
 
     # ------------------------------------------------------------------ worker events
@@ -183,12 +185,20 @@ class Lab:
             elif kind in ("error", "log"):
                 self.message = str(event.get("message") or "")
                 print(f"worker {kind}: {self.message}")
+                if kind == "error":
+                    self._alert(self.message)
 
     def on_exit(self, code: int | None) -> None:
         """The worker's output ended: whatever it was doing is over."""
         with self.lock:
             self._end_run("error", "the arm worker stopped")
+            self._alert(f"The arm worker stopped (exit {code}). Restart dhk-lab and check the arms.")
             self._set("stopped", f"the arm worker stopped (exit {code}): restart dhk-lab. Check the arms.")
+
+    def _alert(self, text: str) -> None:
+        self._alerts += 1
+        self.alert = {"id": self._alerts, "text": text}
+        print(f"ALERT: {text}")
 
     def _set(self, state: str, message: str) -> None:
         self.state, self.message = state, message
@@ -198,6 +208,10 @@ class Lab:
             self._timer.cancel()
             self._timer = None
         if self.run is not None:
+            if status == "error":
+                self._alert(
+                    f"Run {self.run['id']} failed ({self.run['prompt_text'][:80]!r}): {error or 'unknown error'}"
+                )
             self.store.end_run(self.run["id"], status if status in lab_db.RUN_STATUSES else "error", error)
             self.run = None
 
@@ -285,6 +299,7 @@ class Lab:
             return {
                 "state": self.state,
                 "message": self.message,
+                "alert": self.alert,
                 "cameras": list(self.cameras),
                 "run": None
                 if run is None
