@@ -16,8 +16,9 @@ Usage (THE RIGHT ARM WILL MOVE — support it before starting):
         --task "pick up the red cube" \\
         --gravity
 
-Each task gets a dataset folder of its own, named after it, under --data-root (default ~/hackathon_data): the task
-above is saved in ~/hackathon_data/pick-up-the-red-cube. Type another task on the dashboard and press "Set Task" to
+Each task gets a dataset folder of its own under --data-root (default ~/hackathon_data), named after the task and the
+Pacific time it was started: the task above is saved in a folder like
+~/hackathon_data/pick-up-the-red-cube-20261107-094215. Type another task on the dashboard and press "Set Task" to
 create the next folder; the episodes after that are saved there. Start without --task to begin from the dashboard.
 To record everything into one folder instead, give --dataset ~/hackathon_data/my-task.
 
@@ -33,6 +34,7 @@ The right arm is opened energized and tracks the left arm in real time.
 
 import argparse
 import dataclasses
+import datetime
 import hashlib
 import http.server
 import json
@@ -44,6 +46,7 @@ import sys
 import threading
 import time
 import unicodedata
+import zoneinfo
 from collections.abc import Callable
 from typing import Any, Literal
 
@@ -74,9 +77,15 @@ _LEADER_MODE_TEXT = {
 ## The dashboard reads at most this many bytes of a request body, and waits this long for a client's bytes.
 MAX_BODY_BYTES = 4096
 REQUEST_TIMEOUT_S = 5
-## Each task's dataset goes in a folder of its own under the data root; a folder's name is at most this long.
+## Each task's dataset goes in a folder of its own under the data root, named after the task and the Pacific time the
+## task was started (pick-up-the-cube-20261107-094215). A folder's name is at most FOLDER_MAX_CHARS long, the stamp
+## included, so the task's part of it is cut at SLUG_MAX_CHARS.
 DEFAULT_DATA_ROOT = "~/hackathon_data"
 FOLDER_MAX_CHARS = 50
+PACIFIC_ZONE = "America/Los_Angeles"
+STAMP_FORMAT = "%Y%m%d-%H%M%S"
+STAMP_CHARS = len(datetime.datetime(2000, 1, 1).strftime(STAMP_FORMAT))
+SLUG_MAX_CHARS = FOLDER_MAX_CHARS - STAMP_CHARS - 1
 
 _CAMERA_PATH = re.compile(r"^/api/camera/([a-z_]+)\.jpg$")
 ## The dashboard answers only to the loopback names, on any port (an SSH forward may use another local one): a web page
@@ -205,22 +214,45 @@ def _host_allowed(host: str | None) -> bool:
     return host is not None and _LOOPBACK_HOST.fullmatch(host.strip().lower()) is not None
 
 
-def _task_folder(task: str) -> str:
-    """The name of the dataset folder for a task: lowercase letters, digits and hyphens, at most FOLDER_MAX_CHARS.
+def _task_slug(task: str) -> str:
+    """The task's part of its folder name: lowercase letters, digits and hyphens, at most SLUG_MAX_CHARS.
 
-    That is what Dream accepts for a dataset's name. Accents are dropped (é becomes e) and anything else, slashes and
-    dots included, becomes a hyphen, so the name can never point outside the data root. A task with no Latin letter or
-    digit gets `task-` and a short hash of its text, so different tasks never share a folder.
+    Accents are dropped (é becomes e) and anything else, slashes and dots included, becomes a hyphen, so the name can
+    never point outside the data root. A task with no Latin letter or digit gets `task-` and a short hash of its text,
+    so different tasks never share a folder. Two texts with the same slug are the same task.
     """
     ascii_text = unicodedata.normalize("NFKD", task).encode("ascii", "ignore").decode()
-    slug = re.sub(r"[^a-z0-9]+", "-", ascii_text.lower()).strip("-")[:FOLDER_MAX_CHARS].strip("-")
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_text.lower()).strip("-")[:SLUG_MAX_CHARS].strip("-")
     return slug or "task-" + hashlib.sha1(task.encode(), usedforsecurity=False).hexdigest()[:8]
 
 
-class _TaskFolders:
-    """The dataset of the current task: one folder per task under `root`, named after it and created when it is set.
+def _pacific_time(moment: datetime.datetime) -> datetime.datetime:
+    """`moment` (a timezone-aware time) in Pacific time, daylight saving included.
 
-    A `pinned` folder replaces that: the one folder is used whatever the task says.
+    @throws zoneinfo.ZoneInfoNotFoundError The station has no time zone data (Ubuntu's `tzdata` package).
+    """
+    return moment.astimezone(zoneinfo.ZoneInfo(PACIFIC_ZONE))
+
+
+def _now_pacific() -> datetime.datetime:
+    return _pacific_time(datetime.datetime.now(datetime.UTC))
+
+
+def _task_folder(task: str, started: datetime.datetime) -> str:
+    """The name of the dataset folder for a task started at `started` (timezone-aware): the task's slug, then the
+    Pacific time it started, e.g. `pick-up-the-cube-20261107-094215`. That is lowercase letters, digits and hyphens, at
+    most FOLDER_MAX_CHARS, which is what Dream accepts for a dataset's name.
+    """
+    return f"{_task_slug(task)}-{_pacific_time(started).strftime(STAMP_FORMAT)}"
+
+
+class _TaskFolders:
+    """The dataset of the current task: one folder per task under `root`, named after it and the time it was started,
+    and created when the task is set.
+
+    The task stays in its folder for as long as it is the current one: setting the same task again goes on in that
+    folder, and a different task starts a folder of its own (as does the same task in a later session, or after another
+    task in between). A `pinned` folder replaces all that: the one folder is used whatever the task says.
 
     Attributes:
     - writer: The open dataset, or None until a task has been set.
@@ -233,13 +265,18 @@ class _TaskFolders:
         root: pathlib.Path,
         open_writer: Callable[[pathlib.Path], Any],
         pinned: pathlib.Path | None = None,
+        clock: Callable[[], datetime.datetime] = _now_pacific,
     ) -> None:
-        """@param open_writer Opens the dataset writer for a folder; may raise DatasetError."""
+        """@param open_writer Opens the dataset writer for a folder; may raise DatasetError.
+        @param clock The current time, timezone-aware; it stamps a new task's folder name.
+        """
         self.root = root
         self.pinned = pinned
         self.writer: Any = None
         self.error: str | None = None
         self._open_writer = open_writer
+        self._clock = clock
+        self._slug: str | None = None  # the task the open folder was made for
 
     @property
     def folder(self) -> pathlib.Path | None:
@@ -250,22 +287,28 @@ class _TaskFolders:
         return 0 if self.writer is None else self.writer.total_episodes
 
     def use(self, task: str) -> bool:
-        """Opens, creating it if needed, the folder for `task`, unless that is the open one already.
+        """Opens, creating it if needed, the folder for `task`, unless the open one is already that task's.
 
         @return True when the task's folder is open, so recording into it is right.
         """
         from dream_hackathon.dataset import DatasetError
 
-        path = self.pinned or self.root / _task_folder(task)
-        if self.writer is not None and self.writer.root == path:
+        slug = _task_slug(task)
+        if self.writer is not None and (self.writer.root == self.pinned if self.pinned else slug == self._slug):
             self.error = None
             return True
+        try:
+            path = self.pinned or self.root / _task_folder(task, self._clock())
+        except zoneinfo.ZoneInfoNotFoundError:
+            self.error = f"this station has no time zone data for {PACIFIC_ZONE} (install tzdata)"
+            return False
         try:
             path.mkdir(parents=True, exist_ok=True)
             self.writer = self._open_writer(path)
         except (OSError, DatasetError) as error:
             self.error = f"{path.name}: {error}"
             return False
+        self._slug = slug
         self.error = None
         return True
 

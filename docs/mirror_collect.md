@@ -64,9 +64,10 @@ An episode shorter than 1.6 seconds is dropped rather than saved; the console sa
 
 ## Where the episodes go
 
-Each task gets a dataset folder of its own, named after it, under `~/hackathon_data`: the task above is saved in `~/hackathon_data/pick-up-the-red-cube`. The name is the task in lowercase letters, digits and hyphens, at most 50 characters.
+Each task gets a dataset folder of its own under `~/hackathon_data`, named after the task and the time it was started, in Pacific time: the task above, started at 09:42:15 on 7 November 2026, is saved in `~/hackathon_data/pick-up-the-red-cube-20261107-094215`. The name is the task in lowercase letters, digits and hyphens, then the date and time as `YYYYMMDD-HHMMSS`, at most 50 characters in all (a long task is cut short to make room for the time).
 
-- **A new task:** type it in the box and press **Set Task**. The next episodes go in that task's folder, created on the spot. This waits for the episode in progress to be saved or discarded.
+- **A new task:** type it in the box and press **Set Task**. The next episodes go in that task's folder, created on the spot and stamped with the time you pressed the button. This waits for the episode in progress to be saved or discarded.
+- **The same task again:** pressing **Set Task** with the task that is already set changes nothing, and the episodes keep going into the same folder. Once you move to another task, or end the session, that folder is finished: setting the task again later, or starting the script again with the same `--task`, makes a new folder with a new time. Each folder is a separate dataset, so fine-tuning on several of them means picking one or merging them first.
 - **No `--task`:** the script starts with no folder, and **Start Episode** is refused until you set a task on the page.
 - **Everything in one folder:** pass `--dataset ~/hackathon_data/my-task` and every episode goes there, whatever the task says. `--data-root <folder>` moves the place where the per-task folders are made.
 
@@ -74,8 +75,10 @@ List what you have saved (this only reads the folder):
 
 ```bash
 # 🤖 on the station
-uv run dhk-dataset list ~/hackathon_data/pick-up-the-red-cube
+uv run dhk-dataset list ~/hackathon_data/pick-up-the-red-cube-20261107-094215
 ```
+
+The time in a folder's name is when its task was started, so one task's folders list oldest first with `ls -d ~/hackathon_data/pick-up-the-red-cube-*`.
 
 ## Ending the session
 

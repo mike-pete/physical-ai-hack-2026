@@ -1,6 +1,7 @@
 """mirror_collect's dashboard: who may talk to it, what a click does, and how homing and saving fail safely."""
 
 import dataclasses
+import datetime
 import http.server
 import importlib.util
 import json
@@ -8,6 +9,7 @@ import pathlib
 import queue
 import socket
 import threading
+import zoneinfo
 from collections.abc import Iterator
 from types import ModuleType
 
@@ -270,8 +272,13 @@ def test_any_other_save_error_still_stops_the_session(mc: ModuleType) -> None:
 # ------------------------------------------------------------------ one folder per task
 
 
+## 09:42:15 on a Saturday in November, Pacific time (PST, UTC-8).
+START = datetime.datetime(2026, 11, 7, 17, 42, 15, tzinfo=datetime.UTC)
+STAMP = "20261107-094215"
+
+
 @pytest.mark.parametrize(
-    ("task", "folder"),
+    ("task", "slug"),
     [
         ("pick up the red cube", "pick-up-the-red-cube"),
         ("  Pick Up: the RED cube!!  ", "pick-up-the-red-cube"),
@@ -281,24 +288,33 @@ def test_any_other_save_error_still_stops_the_session(mc: ModuleType) -> None:
         ("CUBE_2 v3", "cube-2-v3"),
     ],
 )
-def test_a_task_names_its_folder(mc: ModuleType, task: str, folder: str) -> None:
-    assert mc._task_folder(task) == folder
+def test_a_task_and_its_start_time_name_its_folder(mc: ModuleType, task: str, slug: str) -> None:
+    assert mc._task_folder(task, START) == f"{slug}-{STAMP}"
+
+
+def test_the_stamp_is_pacific_time_whatever_the_clock_zone(mc: ModuleType) -> None:
+    summer = datetime.datetime(2026, 7, 4, 16, 0, 0, tzinfo=datetime.UTC)  # PDT, UTC-7
+    assert mc._task_folder("x", summer) == "x-20260704-090000"
+    tokyo = START.astimezone(datetime.timezone(datetime.timedelta(hours=9)))  # the same moment, shown in Tokyo
+    assert mc._task_folder("x", tokyo) == f"x-{STAMP}"
+    assert mc._task_folder("x", START.replace(hour=7, minute=59, second=59)) == "x-20261106-235959"  # the day before
 
 
 def test_a_long_task_gives_a_short_folder_without_a_trailing_hyphen(mc: ModuleType) -> None:
-    folder = mc._task_folder("word " * 40)
-    assert len(folder) <= mc.FOLDER_MAX_CHARS and not folder.endswith("-") and folder.startswith("word-word")
+    folder = mc._task_folder("word " * 40, START)
+    assert len(folder) == mc.FOLDER_MAX_CHARS and folder.startswith("word-word") and folder.endswith(f"-{STAMP}")
+    assert "--" not in folder
 
 
 def test_a_task_without_latin_letters_still_gets_a_folder_of_its_own(mc: ModuleType) -> None:
-    assert mc._task_folder("日本語") != mc._task_folder("中文")
-    assert mc._task_folder("日本語") == mc._task_folder("日本語")
-    assert mc._task_folder("日本語").startswith("task-") and mc._task_folder("!!!").startswith("task-")
+    assert mc._task_folder("日本語", START) != mc._task_folder("中文", START)
+    assert mc._task_folder("日本語", START) == mc._task_folder("日本語", START)
+    assert mc._task_folder("日本語", START).startswith("task-") and mc._task_folder("!!!", START).startswith("task-")
 
 
 @pytest.mark.parametrize("task", ["..", ".", "/", "a/../../b", "~", "$(rm -rf x)", "name\x00x", "", "   "])
 def test_a_folder_name_can_never_leave_the_root(mc: ModuleType, tmp_path: pathlib.Path, task: str) -> None:
-    path = tmp_path / mc._task_folder(task)
+    path = tmp_path / mc._task_folder(task, START)
     assert path.parent == tmp_path and path.name not in ("", ".", "..")
 
 
@@ -308,68 +324,110 @@ class _FakeWriter:
         self.total_episodes = 0
 
 
+class _Clock:
+    """A clock that stands still at START until it is moved on."""
+
+    def __init__(self) -> None:
+        self.now = START
+
+    def __call__(self) -> datetime.datetime:
+        return self.now
+
+    def advance(self, **delta: float) -> None:
+        self.now += datetime.timedelta(**delta)
+
+
 def _folders(mc: ModuleType, root: pathlib.Path, *, pinned: pathlib.Path | None = None):
-    """A _TaskFolders over fake writers, with the list of folders it opened and the folder names it should refuse."""
+    """A _TaskFolders over fake writers, with the list of folders it opened, the clock, and the folder-name starts it
+    should refuse."""
     opened: list[pathlib.Path] = []
     refused: set[str] = set()
+    clock = _Clock()
 
     def open_writer(path: pathlib.Path) -> _FakeWriter:
-        if path.name in refused:
+        if any(path.name.startswith(start) for start in refused):
             raise dataset.DatasetError(f"{path} holds a dataset recorded another way")
         opened.append(path)
         return _FakeWriter(path)
 
-    return mc._TaskFolders(root, open_writer, pinned=pinned), opened, refused
+    return mc._TaskFolders(root, open_writer, pinned=pinned, clock=clock), opened, refused, clock
 
 
 def test_setting_a_task_creates_its_folder(mc: ModuleType, tmp_path: pathlib.Path) -> None:
-    folders, opened, _ = _folders(mc, tmp_path / "hackathon_data")  # the root does not exist yet
+    folders, opened, _, _ = _folders(mc, tmp_path / "hackathon_data")  # the root does not exist yet
     assert folders.folder is None
     assert folders.use("Pick up the cube") is True
-    assert (tmp_path / "hackathon_data" / "pick-up-the-cube").is_dir()
-    assert folders.folder == tmp_path / "hackathon_data" / "pick-up-the-cube" and folders.error is None
+    expected = tmp_path / "hackathon_data" / f"pick-up-the-cube-{STAMP}"
+    assert expected.is_dir() and folders.folder == expected and folders.error is None
 
 
-def test_the_same_task_keeps_the_open_dataset(mc: ModuleType, tmp_path: pathlib.Path) -> None:
-    folders, opened, _ = _folders(mc, tmp_path)
+def test_the_same_task_keeps_the_open_dataset_as_time_passes(mc: ModuleType, tmp_path: pathlib.Path) -> None:
+    folders, opened, _, clock = _folders(mc, tmp_path)
     folders.use("Pick up the cube")
     writer = folders.writer
+    clock.advance(hours=1)
     assert folders.use("pick up the CUBE!") is True
     assert folders.writer is writer and len(opened) == 1
 
 
 def test_a_new_task_gets_a_new_folder_and_the_old_one_stays(mc: ModuleType, tmp_path: pathlib.Path) -> None:
-    folders, _, _ = _folders(mc, tmp_path)
+    folders, _, _, clock = _folders(mc, tmp_path)
     folders.use("stack the blocks")
+    clock.advance(minutes=5)
     folders.use("pour the water")
-    assert (tmp_path / "stack-the-blocks").is_dir() and (tmp_path / "pour-the-water").is_dir()
-    assert folders.folder == tmp_path / "pour-the-water"
+    assert (tmp_path / f"stack-the-blocks-{STAMP}").is_dir() and (tmp_path / "pour-the-water-20261107-094715").is_dir()
+    assert folders.folder == tmp_path / "pour-the-water-20261107-094715"
+
+
+def test_the_same_task_after_another_one_starts_a_folder_of_its_own(mc: ModuleType, tmp_path: pathlib.Path) -> None:
+    folders, _, _, clock = _folders(mc, tmp_path)
+    folders.use("stack the blocks")
+    clock.advance(minutes=5)
+    folders.use("pour the water")
+    clock.advance(minutes=5)
+    folders.use("stack the blocks")
+    assert folders.folder == tmp_path / "stack-the-blocks-20261107-095215"
+    assert (tmp_path / f"stack-the-blocks-{STAMP}").is_dir()
 
 
 def test_a_folder_that_cannot_be_opened_is_reported(mc: ModuleType, tmp_path: pathlib.Path) -> None:
-    folders, _, refused = _folders(mc, tmp_path)
+    folders, _, refused, clock = _folders(mc, tmp_path)
     folders.use("stack the blocks")
     refused.add("pour-the-water")
+    clock.advance(minutes=5)
     assert folders.use("pour the water") is False
     assert "recorded another way" in folders.error
-    assert folders.folder == tmp_path / "stack-the-blocks"  # still the old one: the caller must not record into it
+    # still the old one: the caller must not record into it
+    assert folders.folder == tmp_path / f"stack-the-blocks-{STAMP}"
     refused.clear()
+    clock.advance(minutes=1)
     assert folders.use("pour the water") is True and folders.error is None
-    assert folders.folder == tmp_path / "pour-the-water"
+    assert folders.folder == tmp_path / "pour-the-water-20261107-094815"  # the retry is stamped when it succeeds
 
 
 def test_a_root_that_is_a_file_is_reported(mc: ModuleType, tmp_path: pathlib.Path) -> None:
     (tmp_path / "hackathon_data").write_text("not a folder")
-    folders, _, _ = _folders(mc, tmp_path / "hackathon_data")
+    folders, _, _, _ = _folders(mc, tmp_path / "hackathon_data")
     assert folders.use("stack the blocks") is False
     assert folders.error and folders.folder is None
 
 
-def test_a_pinned_folder_ignores_the_task(mc: ModuleType, tmp_path: pathlib.Path) -> None:
+def test_a_station_without_time_zone_data_is_reported_not_crashed(mc: ModuleType, tmp_path: pathlib.Path) -> None:
+    def no_zone() -> datetime.datetime:
+        raise zoneinfo.ZoneInfoNotFoundError("America/Los_Angeles")
+
+    folders = mc._TaskFolders(tmp_path, _FakeWriter, clock=no_zone)
+    assert folders.use("stack the blocks") is False
+    assert "tzdata" in folders.error and folders.folder is None and list(tmp_path.iterdir()) == []
+
+
+def test_a_pinned_folder_ignores_the_task_and_the_clock(mc: ModuleType, tmp_path: pathlib.Path) -> None:
     pinned = tmp_path / "my-task"
-    folders, opened, _ = _folders(mc, tmp_path, pinned=pinned)
-    assert folders.use("anything") is True and folders.use("something else") is True
-    assert opened == [pinned] and not (tmp_path / "anything").exists()
+    folders, opened, _, clock = _folders(mc, tmp_path, pinned=pinned)
+    assert folders.use("anything") is True
+    clock.advance(days=1)
+    assert folders.use("something else") is True
+    assert opened == [pinned] and list(tmp_path.iterdir()) == [pinned]
 
 
 def test_a_new_task_asks_the_loop_for_its_folder(server: _Server) -> None:
@@ -402,10 +460,14 @@ def test_the_page_has_a_place_for_the_folder(mc: ModuleType) -> None:
 
 
 def test_episodes_are_saved_in_the_folder_of_their_task(mc: ModuleType, tmp_path: pathlib.Path) -> None:
-    """With the real dataset writer: each task's episodes land in its own folder, which later episodes continue."""
+    """With the real dataset writer: each task's episodes land in its own folder, which the task's later episodes
+    continue for as long as it is the current task."""
     keys = list(layouts.video_keys("makermods").values())
     names = [f"v{i}" for i in range(layouts.WIDTH)]
-    folders = mc._TaskFolders(tmp_path, lambda path: dataset.DatasetWriter(path, 30, "metal", names, keys, 320, 180))
+    clock = _Clock()
+    folders = mc._TaskFolders(
+        tmp_path, lambda path: dataset.DatasetWriter(path, 30, "metal", names, keys, 320, 180), clock=clock
+    )
     image = np.zeros((180, 320, 3), np.uint8)
 
     def record(task: str) -> int:
@@ -418,11 +480,19 @@ def test_episodes_are_saved_in_the_folder_of_their_task(mc: ModuleType, tmp_path
         return episode.save()
 
     assert record("stack the blocks") == 0
-    assert record("pour the water") == 0  # a new folder starts at episode 0
-    assert record("Stack the blocks!") == 1  # the first task's folder goes on from where it stopped
-    for name, episodes in (("stack-the-blocks", 2), ("pour-the-water", 1)):
+    assert record("Stack the blocks!") == 1  # the same task goes on in its folder
+    clock.advance(minutes=5)
+    assert record("pour the water") == 0  # a new task: a new folder starts at episode 0
+    clock.advance(minutes=5)
+    assert record("stack the blocks") == 0  # the first task again, later: a folder of its own, stamped when it started
+    for name, episodes in (
+        (f"stack-the-blocks-{STAMP}", 2),
+        ("pour-the-water-20261107-094715", 1),
+        ("stack-the-blocks-20261107-095215", 1),
+    ):
         info = json.loads((tmp_path / name / "meta" / "info.json").read_text())
         assert info["total_episodes"] == episodes, name
-    assert (tmp_path / "stack-the-blocks" / "data" / "chunk-000" / "episode_000001.parquet").exists()
-    tasks = (tmp_path / "stack-the-blocks" / "meta" / "tasks.jsonl").read_text().splitlines()
+    first = tmp_path / f"stack-the-blocks-{STAMP}"
+    assert (first / "data" / "chunk-000" / "episode_000001.parquet").exists()
+    tasks = (first / "meta" / "tasks.jsonl").read_text().splitlines()
     assert {json.loads(line)["task"] for line in tasks} == {"stack the blocks", "Stack the blocks!"}
