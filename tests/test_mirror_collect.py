@@ -471,7 +471,7 @@ def test_homing_holds_while_neither_arm_can_be_read(mc: ModuleType) -> None:
 def test_homing_frames_drive_the_joints_and_keep_gravity_and_the_gripper(mc: ModuleType) -> None:
     commands = {"shoulder_pan": (0.0, 0.0, 10.0, 0.0, 1.5), "gripper": (0.0, 0.0, 30.0, 0.0, 0.2)}
     frames = mc._homing_frames(commands, {"shoulder_pan": 45.0})
-    assert frames["shoulder_pan"] == (mc.LEADER_HOME_KP, mc.LEADER_HOME_KD, 45.0, 0.0, 1.5)
+    assert frames["shoulder_pan"] == (*mc.LEADER_HOME_GAINS["shoulder_pan"], 45.0, 0.0, 1.5)
     assert frames["gripper"] == commands["gripper"]
     assert mc._homing_frames(commands, None) is commands
 
@@ -483,19 +483,25 @@ def test_the_leader_homing_wrapper_rewrites_frames_only_while_a_target_is_set(mc
         def sync_write_metal(self, commands: dict) -> None:
             sent.append(commands)
 
+    class _Config:
+        use_velocity_feedforward = True
+
     class _Device:
         bus = _Bus()
+        config = _Config()
 
     device = _Device()
     homing = mc._LeaderHoming(device)
     commands = {"shoulder_pan": (0.0, 0.0, 10.0, 0.0, 1.5)}
     device.bus.sync_write_metal(commands)
     homing.set_target(np.radians([45.0, 0, 0, 0, 0, 0]))
+    assert device.config.use_velocity_feedforward is False  # weightless mode's friction assist is off while homing
     device.bus.sync_write_metal(commands)
     homing.set_target(None)
+    assert device.config.use_velocity_feedforward is True
     device.bus.sync_write_metal(commands)
     assert sent[0] == commands and sent[2] == commands
-    assert sent[1]["shoulder_pan"][:3] == (mc.LEADER_HOME_KP, mc.LEADER_HOME_KD, pytest.approx(45.0))
+    assert sent[1]["shoulder_pan"][:3] == (*mc.LEADER_HOME_GAINS["shoulder_pan"], pytest.approx(45.0))
 
 
 def test_the_leader_ramps_from_its_last_target_so_the_error_builds(mc: ModuleType) -> None:
@@ -514,5 +520,5 @@ def test_the_leader_target_never_runs_further_ahead_than_the_cap(mc: ModuleType)
 
 
 def test_the_leader_counts_as_home_within_its_looser_bound(mc: ModuleType) -> None:
-    assert mc._home_both_step(HOME, HOME, HOME + 0.04, HOME, 0.1, 1.0)[0] == "reached"
+    assert mc._home_both_step(HOME, HOME, HOME + 0.025, HOME, 0.1, 1.0)[0] == "reached"
     assert mc._home_both_step(HOME + 0.04, HOME, HOME, HOME, 0.1, 1.0)[0] == "move"

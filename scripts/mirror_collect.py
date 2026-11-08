@@ -55,16 +55,22 @@ GRIPPER = "gripper"
 ## motor under position control rarely settles closer than this, so a tighter bound runs out HOME_TIMEOUT_S every time.
 HOME_SPEED_FRACTION = 0.5
 HOME_TOLERANCE_RAD = 0.02
-## The MIT gains the gravity-compensated leader is driven home with: MetalLeader's default hold gains.
-LEADER_HOME_KP = 50.0
-LEADER_HOME_KD = 1.0
-## The leader has no stiff position loop of its own: friction and the gravity model's error leave it a little short of
-## its target, so it counts as home within this looser bound (radians).
-LEADER_HOME_TOLERANCE_RAD = 0.05
+## The MIT (kp, kd) the leader is driven home with, per joint: MetalFollower's own follow gains. While it goes home the
+## leader leaves weightless mode (see _LeaderHoming) and is position-controlled like the follower.
+LEADER_HOME_GAINS = {
+    "shoulder_pan": (100.0, 5.0),
+    "shoulder_lift": (100.0, 5.0),
+    "elbow_flex": (100.0, 5.0),
+    "wrist_flex": (50.0, 5.0),
+    "wrist_yaw": (20.0, 0.6),
+    "wrist_roll": (20.0, 0.6),
+}
+## The leader counts as home within this bound (radians): friction and the gravity model's error leave a position-
+## controlled arm a little short of its target.
+LEADER_HOME_TOLERANCE_RAD = 0.03
 ## The leader's target runs ahead of the arm by at most this much (radians), so the error builds until friction gives
-## way (a target that follows the arm never exerts more than one tick's step) while the torque stays at most
-## LEADER_HOME_KP x this.
-LEADER_HOME_MAX_LEAD_RAD = 0.15
+## way (a target that follows the arm never exerts more than one tick's step) while the torque stays bounded.
+LEADER_HOME_MAX_LEAD_RAD = 0.05
 ## Homing gives up after this long and mirroring resumes, so a joint that cannot reach home cannot lock the session.
 HOME_TIMEOUT_S = 30.0
 ## The task an episode records when none is given, and the longest task text Dream accepts (as in collect.py).
@@ -215,12 +221,13 @@ def _homing_frames(
     @param commands Per motor, the (kp, kd, position in degrees, velocity, torque) a gravity tick wrote.
     @param target_deg Per joint, where to drive it in degrees, or None to leave the frames alone (the gripper is never
         in it, so it stays backdrivable).
-    @return The frames to send: the gravity torque stays, so the arm still carries its own weight.
+    @return The frames to send, with LEADER_HOME_GAINS: the torque stays what the tick computed, so the arm still
+        carries its own weight.
     """
     if target_deg is None:
         return commands
     return {
-        motor: (LEADER_HOME_KP, LEADER_HOME_KD, target_deg[motor], 0.0, frame[4]) if motor in target_deg else frame
+        motor: (*LEADER_HOME_GAINS[motor], target_deg[motor], 0.0, frame[4]) if motor in target_deg else frame
         for motor, frame in commands.items()
     }
 
@@ -230,19 +237,25 @@ class _LeaderHoming:
 
     MetalLeader's gravity thread writes kp=0 frames, so it never pulls toward a position. This wraps its bus's
     sync_write_metal to rewrite those frames while a target is set (see _homing_frames); with none set they pass
-    through unchanged.
+    through unchanged. While a target is set the leader also leaves weightless mode: its velocity (friction)
+    feedforward, which cancels the arm's friction so a hand moves it freely, is switched off, since it fights a
+    position target. Plain gravity torque remains, so the arm does not sag. None puts weightless mode back.
     """
 
     def __init__(self, device) -> None:
+        self._device = device
         self._target_deg: dict[str, float] | None = None
+        self._weightless = bool(device.config.use_velocity_feedforward)
         self._write = device.bus.sync_write_metal
         device.bus.sync_write_metal = self._send
 
     def set_target(self, joints_rad: np.ndarray | None) -> None:
-        """Drives the leader's six joints to these angles, or lets it go back to weightless with None."""
+        """Drives the leader's six joints to these angles, or puts weightless mode back with None."""
         if joints_rad is None:
+            self._device.config.use_velocity_feedforward = self._weightless
             self._target_deg = None
         else:
+            self._device.config.use_velocity_feedforward = False
             self._target_deg = {m: math.degrees(v) for m, v in zip(MOTORS, joints_rad, strict=True)}
 
     def _send(self, commands: dict) -> None:
