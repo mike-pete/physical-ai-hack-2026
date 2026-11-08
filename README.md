@@ -127,6 +127,49 @@ dreamcli robot run --checkpoint <your model> --task "put the red cube in the bow
 ```
 
 On a YAM fine-tune, add `--action-space joint` to both; to run Dream-1 as it is, leave out `--checkpoint`.
+### Run a fine-tuned model
+
+The fine-tunes already made at this station are in [docs/trained_models.md](docs/trained_models.md): for each one, the task it was trained on and its number of episodes. They are Metal arm models, so there is no `--action-space joint`. A model runs only under the Dream account that made it (the key in `~/.dreamlabs/credentials`). Run it on the station, with the arms to themselves (close `dhk-collect` first), and do not move the cameras. `dreamcli` is installed in the Dream library's environment, so in every new terminal start with `source ~/dream-env/bin/activate`; without it the shell answers `dreamcli: command not found`.
+
+**1. List the models** (the arms do not move):
+
+```bash
+# 🤖 on the station
+~/dream-env/bin/python -c "import dream; print(*[m.id for m in dream.DreamClient().get_models() if m.owner == 'mine'], sep='\n')"
+```
+
+**2. Dry run** with the model's id and the task it was trained on. The model answers and the arms do not move. The first call to a model that is not running waits while it starts, up to an hour:
+
+```bash
+# 🤖 on the station: DRY RUN, the arms do not move
+source ~/dream-env/bin/activate
+dreamcli robot run --checkpoint <model id> --task "<task text>" --dry-run
+```
+
+Examples, one per task (`--task` is the instruction the model was recorded with):
+
+```bash
+# 🤖 on the station: DRY RUN, the arms do not move
+source ~/dream-env/bin/activate
+# unplug the orange USB cables from the power strip, right to left (10 episodes)
+dreamcli robot run --checkpoint dream-1-ft:c8fae656-cables-lf-1000 --task "Unplug each orange USB cable from the power strip and put them on the table. Go right to left" --dry-run
+# stack the blocks into a tower (14 episodes)
+dreamcli robot run --checkpoint dream-1-ft:c8fae656-blocks-1000 --task "stack the rectangular blocks in a tower" --dry-run
+# colorful golf balls into the basket, not the white ones (19 episodes, 8 of golf balls)
+dreamcli robot run --checkpoint dream-1-ft:c8fae656-golf-1000 --task "Place the colorful golf balls into the basket. Do not touch white balls." --dry-run
+# pick up and place the orange ball in the box (11 episodes)
+dreamcli robot run --checkpoint dream-1-ft:c8fae656-orange-1000 --task "pick up and place orange ball in box" --dry-run
+```
+
+**3. Real run**, once the dry run looks right: a hand on the emergency stop, everyone out of the arms' reach, then the same command without `--dry-run`. Both arms first move to the home pose in `~/.dreamlabs/station.yaml`, then play the model's moves:
+
+```bash
+# 🤖 on the station: REAL RUN, the arms move (hand on the emergency stop)
+source ~/dream-env/bin/activate
+dreamcli robot run --checkpoint <model id> --task "<task text>"
+```
+
+For example, the cables model is the first example above without `--dry-run`. [docs/trained_models.md](docs/trained_models.md) has every model's command, and [docs/running_your_model.md](docs/running_your_model.md) explains the options.
 
 ### Build with the Dream API
 
@@ -174,7 +217,7 @@ No arms yet? On a YAM config, `uv run dhk-collect --config configs/yam.yaml --si
 | `configs/` | One template station config per arm type; a station's own is `configs/station.yaml` (not committed) |
 | `tools/` | Dream API steps, run in the Dream library's environment: `add_eef.py`, `upload_dataset.py` (upload only), `finetune.py` |
 | `scripts/` | Device checks, the URDF download, and station helpers: `use_dream_tcp.py` (Dream's tool point for Metal and Maker arms), `allow_can_bringup.sh` (the dashboard's CAN buttons), `remove_api_key.sh`, `wipe_station.sh` |
-| `docs/` | Collection, fine-tuning, running and setup guides |
+| `docs/` | Collection, fine-tuning, running and setup guides, and `trained_models.md` (the fine-tunes made at this station) |
 | `CLAUDE.md`, `.claude/skills/` | Claude Code's rules for this repo and the `station-setup` skill |
 
 Run the tests with `uv sync --group dream && uv run pytest` (no hardware needed).
