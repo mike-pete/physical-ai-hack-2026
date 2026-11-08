@@ -59,3 +59,7 @@ Weightless is built on Dream's motor driver internals (it drops the joints' stif
 ## "The gripper motor is not disabled (status 13)"
 
 An arm refused to open because its gripper motor latched a fault (13 is "lost contact with the computer": an earlier process stopped talking to it). The red banner then offers **Clear gripper fault**: it sends Damiao's clear-error frame to that arm's gripper and reports the status it reads back, then you press Weightless to try again. Dream's own check still decides whether the arm opens. If the fault stays, support the arm and switch its power off and on. This button is untested on hardware.
+
+## The worker's log
+
+`~/hackathon_data/lab/worker.log` holds the arm worker's log with timestamps, Dream's arm threads included (a line like `arm 'left': latched down: ...` says why an arm stopped). It is appended to, never cleared.

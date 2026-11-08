@@ -25,6 +25,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import logging
 import math
 import os
 import pathlib
@@ -795,7 +796,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="The Prompt Lab's arm worker (started by dhk-lab).")
     parser.add_argument("--frames-dir", required=True, help="where each camera's latest JPEG is written")
     parser.add_argument("--fake", action="store_true", help="synthetic cameras and no arms")
+    parser.add_argument("--log-file", help="also write the libraries' log (Dream's arm threads included) here")
     args = parser.parse_args()
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    if args.log_file:
+        handlers.append(logging.FileHandler(args.log_file))
+    logging.basicConfig(
+        level=logging.INFO, handlers=handlers, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     # stdout carries only events: anything a library prints goes to stderr instead.
     events = os.fdopen(os.dup(1), "w", buffering=1)
     os.dup2(2, 1)

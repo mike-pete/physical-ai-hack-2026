@@ -524,16 +524,17 @@ PAGE_PATH = pathlib.Path(__file__).with_name("lab_page.html")
 # ---------------------------------------------------------------------- start and stop
 
 
-def worker_command(frames_dir: pathlib.Path) -> list[str]:
+def worker_command(frames_dir: pathlib.Path, log_file: pathlib.Path | None = None) -> list[str]:
     """The argv of the arm worker: Dream's Python on a station, the fake worker when DHK_LAB_FAKE is set."""
+    extra = ["--log-file", str(log_file)] if log_file is not None else []
     if os.environ.get(FAKE_ENV):
-        return [sys.executable, str(WORKER_SCRIPT), "--fake", "--frames-dir", str(frames_dir)]
+        return [sys.executable, str(WORKER_SCRIPT), "--fake", "--frames-dir", str(frames_dir), *extra]
     python = pathlib.Path(DREAM_PYTHON).expanduser()
     if not python.is_file():
         raise SystemExit(
             f"{python} is not there: the Dream library's environment is missing (docs/hardware_setup.md, 6)"
         )
-    return [str(python), str(WORKER_SCRIPT), "--frames-dir", str(frames_dir)]
+    return [str(python), str(WORKER_SCRIPT), "--frames-dir", str(frames_dir), *extra]
 
 
 def main() -> None:
@@ -558,7 +559,7 @@ def main() -> None:
         shutil.rmtree(frames_dir, ignore_errors=True)
         raise SystemExit(f"could not serve on port {PORT} ({error}): is another dhk-lab running?") from None
     server.daemon_threads = True
-    lab.worker = Worker(worker_command(frames_dir), lab.on_event, lab.on_exit)
+    lab.worker = Worker(worker_command(frames_dir, root / "worker.log"), lab.on_event, lab.on_exit)
     stop = threading.Event()
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, lambda *_: stop.set())
