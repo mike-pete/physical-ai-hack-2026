@@ -153,7 +153,7 @@ def test_what_a_start_or_save_command_does(mc: ModuleType, cmd: str, recording: 
 @pytest.mark.parametrize(
     ("asked", "active", "mode"),
     [
-        (False, False, "torque_off"),  # no --gravity: the person carries the arm
+        (False, False, "torque_off"),  # no gravity compensation: the person carries the arm
         (True, True, "gravity"),
         (True, False, "gravity_failed"),  # asked for, but it fell back to torque off: must not look like torque off
     ],
@@ -426,3 +426,99 @@ def test_episodes_are_saved_in_the_folder_of_their_task(mc: ModuleType, tmp_path
     assert (tmp_path / "stack-the-blocks" / "data" / "chunk-000" / "episode_000001.parquet").exists()
     tasks = (tmp_path / "stack-the-blocks" / "meta" / "tasks.jsonl").read_text().splitlines()
     assert {json.loads(line)["task"] for line in tasks} == {"stack the blocks", "Stack the blocks!"}
+
+
+# ------------------------------------------------------------------ homing both arms
+
+
+def test_both_arms_ramp_home_together(mc: ModuleType) -> None:
+    outcome, follower, leader = mc._home_both_step(
+        np.array([1.0, 0, 0, 0, 0, 0]), HOME, np.array([-1.0, 0, 0, 0, 0, 0]), HOME, 0.1, 1.0
+    )
+    assert outcome == "move"
+    assert np.allclose(follower, [0.9, 0, 0, 0, 0, 0])
+    assert np.allclose(leader, [-0.9, 0, 0, 0, 0, 0])
+
+
+def test_an_arm_that_is_home_is_held_there_while_the_other_arrives(mc: ModuleType) -> None:
+    outcome, follower, leader = mc._home_both_step(HOME, HOME, np.full(6, 1.0), HOME, 0.1, 1.0)
+    assert outcome == "move"
+    assert np.array_equal(follower, HOME)
+    assert np.allclose(leader, np.full(6, 0.9))
+
+
+def test_homing_is_reached_only_when_both_arms_are_home(mc: ModuleType) -> None:
+    assert mc._home_both_step(HOME, HOME, HOME + 0.01, HOME, 0.1, 1.0)[0] == "reached"
+    assert mc._home_both_step(HOME, HOME, np.full(6, 0.5), HOME, 0.1, 1.0)[0] == "move"
+
+
+def test_a_leader_without_a_home_is_left_alone(mc: ModuleType) -> None:
+    outcome, follower, leader = mc._home_both_step(np.full(6, 1.0), HOME, np.full(6, 5.0), None, 0.1, 1.0)
+    assert outcome == "move"
+    assert np.allclose(follower, np.full(6, 0.9))
+    assert leader is None
+
+
+def test_either_arm_running_out_of_time_ends_homing(mc: ModuleType) -> None:
+    far = np.full(6, 1.0)
+    assert mc._home_both_step(HOME, HOME, far, HOME, 0.1, mc.HOME_TIMEOUT_S + 1)[0] == "timeout"
+
+
+def test_homing_holds_while_neither_arm_can_be_read(mc: ModuleType) -> None:
+    assert mc._home_both_step(None, HOME, None, HOME, 0.1, 1.0)[0] == "hold"
+
+
+def test_homing_frames_drive_the_joints_and_keep_gravity_and_the_gripper(mc: ModuleType) -> None:
+    commands = {"shoulder_pan": (0.0, 0.0, 10.0, 0.0, 1.5), "gripper": (0.0, 0.0, 30.0, 0.0, 0.2)}
+    frames = mc._homing_frames(commands, {"shoulder_pan": 45.0})
+    assert frames["shoulder_pan"] == (*mc.LEADER_HOME_GAINS["shoulder_pan"], 45.0, 0.0, 1.5)
+    assert frames["gripper"] == commands["gripper"]
+    assert mc._homing_frames(commands, None) is commands
+
+
+def test_the_leader_homing_wrapper_rewrites_frames_only_while_a_target_is_set(mc: ModuleType) -> None:
+    sent = []
+
+    class _Bus:
+        def sync_write_metal(self, commands: dict) -> None:
+            sent.append(commands)
+
+    class _Config:
+        use_velocity_feedforward = True
+
+    class _Device:
+        bus = _Bus()
+        config = _Config()
+
+    device = _Device()
+    homing = mc._LeaderHoming(device)
+    commands = {"shoulder_pan": (0.0, 0.0, 10.0, 0.0, 1.5)}
+    device.bus.sync_write_metal(commands)
+    homing.set_target(np.radians([45.0, 0, 0, 0, 0, 0]))
+    assert device.config.use_velocity_feedforward is False  # weightless mode's friction assist is off while homing
+    device.bus.sync_write_metal(commands)
+    homing.set_target(None)
+    assert device.config.use_velocity_feedforward is True
+    device.bus.sync_write_metal(commands)
+    assert sent[0] == commands and sent[2] == commands
+    assert sent[1]["shoulder_pan"][:3] == (*mc.LEADER_HOME_GAINS["shoulder_pan"], pytest.approx(45.0))
+
+
+def test_the_leader_ramps_from_its_last_target_so_the_error_builds(mc: ModuleType) -> None:
+    """A target that follows a stalled arm never exerts more than one tick's step; this one runs ahead of it."""
+    stuck = np.full(6, 0.5)
+    ahead = stuck + 0.05
+    _, _, leader = mc._home_both_step(HOME, HOME, stuck, HOME, 0.025, 1.0, ahead)
+    assert np.allclose(leader, np.full(6, 0.5) + 0.05 - 0.025)
+    assert np.allclose(mc._home_both_step(HOME, HOME, stuck, HOME, 0.025, 1.0)[2], np.full(6, 0.475))
+
+
+def test_the_leader_target_never_runs_further_ahead_than_the_cap(mc: ModuleType) -> None:
+    stuck = np.full(6, 0.5)
+    _, _, leader = mc._home_both_step(HOME, HOME, stuck, HOME, 0.025, 1.0, np.full(6, 0.0))
+    assert np.allclose(leader, stuck - mc.LEADER_HOME_MAX_LEAD_RAD)
+
+
+def test_the_leader_counts_as_home_within_its_looser_bound(mc: ModuleType) -> None:
+    assert mc._home_both_step(HOME, HOME, HOME + 0.025, HOME, 0.1, 1.0)[0] == "reached"
+    assert mc._home_both_step(HOME + 0.04, HOME, HOME, HOME, 0.1, 1.0)[0] == "move"

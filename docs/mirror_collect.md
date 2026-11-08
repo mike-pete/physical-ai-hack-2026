@@ -27,15 +27,15 @@ It works on **Metal and Maker arm stations only** (not the YAM). The station has
    tmux new -A -s mirror
    ```
 
-3. **Start the script.** The task you give names the folder your episodes go in (see [Where the episodes go](#where-the-episodes-go)). Add `--gravity` if the station has Metal arms, so the left arm is weightless:
+3. **Start the script.** The task you give names the folder your episodes go in (see [Where the episodes go](#where-the-episodes-go)). On a Metal arm station the left arm is weightless by itself, with nothing to add:
 
    ```bash
    # 🤖 on the station: REAL RUN, the right arm moves
    cd ~/physical-ai-hacks
-   uv run python scripts/mirror_collect.py --config configs/station.yaml --task "pick up the red cube" --gravity
+   uv run python scripts/mirror_collect.py --config configs/station.yaml --task "pick up the red cube"
    ```
 
-   Without `--gravity` the left arm is opened with its motors off, so you carry its weight and the friction in its joints. It works, but it is heavy to move. `--gravity` needs a Metal arm station.
+   On a Maker arm station, or when gravity compensation fails to start, the left arm is opened with its motors off, so you carry its weight and the friction in its joints. It works, but it is heavy to move, and **Go to Home** then moves only the right arm.
 
 4. **Open http://localhost:8080 in your laptop's browser.** The page is there only while the script runs. If the script says the port is taken, add `--port 8091` to the command and use the same number in the `ssh -L` line and in the browser.
 
@@ -45,18 +45,18 @@ It works on **Metal and Maker arm stations only** (not the YAM). The station has
 | --- | --- |
 | The three cameras, as they are recorded | Top of the page |
 | `idle`, `REC` or `HOMING`, then frames and episodes saved, the left arm's pan angle and its gripper | The status bar |
-| How the left arm is held | The status bar, next to the mode: **green** `gravity compensation`, **orange** `torque off, no gravity compensation`, **red** `--gravity FAILED` |
+| How the left arm is held | The status bar, next to the mode: **green** `gravity compensation`, **orange** `torque off, no gravity compensation`, **red** `gravity compensation FAILED` |
 | The folder the episodes are saved in | Below the status bar (`folder: ...`) |
 | **Start Episode** / **Save Episode**, **Discard**, **Go to Home** | The buttons |
 | The task, and **Set Task** | The text box |
 
-**Check the left arm's colour before you record.** Red means `--gravity` was asked for but did not start, so the arm is running with its motors off. The console says why; call the staff if it keeps happening. Green means the motors hold the arm up, so you move it with much less effort.
+**Check the left arm's colour before you record.** Red means gravity compensation was expected but did not start, so the arm is running with its motors off. The console says why; call the staff if it keeps happening. Green means the motors hold the arm up, so you move it with much less effort.
 
 To record an episode:
 
 1. Move the left arm; the right arm copies it. Close the left gripper to close the right one.
 2. Press **Start Episode**, do the task with the left arm, then press **Save Episode**. **Discard** throws the episode away.
-3. **Go to Home** brings the right arm back to the pose it had when the script started, at a slow, steady speed. It is refused while an episode is recording.
+3. **Go to Home** moves **both arms** to Dream-1's home pose (the one `dreamcli setup` saved in `~/.dreamlabs/station.yaml`), the left arm under its own motor power (it leaves weightless mode while it goes, and returns to it when it arrives), at half the station's top joint speed. Keep clear of both arms and a hand near the emergency stop. If Dream's home cannot be read, or the left arm is not in gravity compensation, it moves only the right arm, to the pose it had when the script started (the console says which). It is refused while an episode is recording.
 
 You can also type in the tmux screen instead of clicking: Enter starts or saves an episode, `d` discards it, `h` goes home, and `q` quits.
 
@@ -79,7 +79,7 @@ uv run dhk-dataset list ~/hackathon_data/pick-up-the-red-cube
 
 ## Ending the session
 
-**Support the left arm before you end the session.** With `--gravity`, its motors stop holding it up when the session ends, and it can fall.
+**Support the left arm before you end the session.** In gravity compensation, its motors stop holding it up when the session ends, and it can fall.
 
 In the tmux screen, type `q` and press Enter. It saves the episode in progress, returns the right arm to its start pose and releases it. Ctrl+C does the same but **discards** the episode in progress. Do not use `kill -9` or close the window: that skips the shutdown, so the right arm is neither returned nor released.
 
@@ -91,8 +91,7 @@ Your saved episodes are safe either way: each is written to disk the moment you 
 | --- | --- |
 | `camera 'overhead': cannot open /dev/v4l/...` | Another program holds the cameras, often an earlier `mirror_collect.py`. Find it with `pgrep -af mirror_collect` and end it as above. |
 | `could not start dashboard on port 8080` | The port is taken. Use `--port 8091` and match it in `ssh -L` and the browser. |
-| `--gravity failed (...); falling back to torque-off` | The left arm is running without gravity compensation (the bar is red). Call the staff. |
-| `--gravity is only supported for Metal arms` | A Maker arm station: leave `--gravity` out. |
+| `gravity compensation failed (...); falling back to torque-off` | The left arm is running without gravity compensation (the bar is red). Call the staff. |
 | `This script is for Metal/Maker arm stations only` | A YAM station: use [`dhk-collect`](data_collection.md). |
 | Start Episode is greyed out or refused | Set a task first, or wait for homing to finish. |
 

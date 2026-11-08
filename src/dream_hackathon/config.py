@@ -148,6 +148,59 @@ class StationConfig:
     makermods: MakerModsConfig | None
 
 
+## The config `dreamcli setup` writes, whose `follower_l.home` and `follower_r.home` are Dream-1's home pose.
+DREAM_STATION_PATH = pathlib.Path("~/.dreamlabs/station.yaml").expanduser()
+## The arms whose joints the kit records in Dream's own frame (robots.metal: "the motor angles in radians, sign +1,
+## no offset"), so Dream's home can be driven as it is. Dream's Maker joints are turn-corrected, the YAM's are i2rt's.
+_DREAM_HOME_ARMS = ("metal",)
+_DREAM_SECTIONS = {"left": "follower_l", "right": "follower_r"}
+
+
+def dream_home(station: StationConfig, path: pathlib.Path = DREAM_STATION_PATH) -> dict[str, npt.NDArray[np.float64]]:
+    """Dream-1's home pose for each arm, read from the config `dreamcli setup` wrote, in the kit's joint frame.
+
+    Each Dream arm section is matched to the kit's arm by its port, so a swapped mapping is refused rather than
+    sending an arm to the other one's home.
+
+    @param station The station config.
+    @param path Dream's station config.
+    @return Per side, six joint angles in radians.
+    @throws ConfigError There is no usable home: the message says why.
+    """
+    if station.arm not in _DREAM_HOME_ARMS:
+        raise ConfigError(f"Dream's home is used on {', '.join(_DREAM_HOME_ARMS)} arms only, not {station.arm}")
+    if not path.is_file():
+        raise ConfigError(f"{path} does not exist: `dreamcli setup` writes it, with each arm's home")
+    try:
+        raw = yaml.safe_load(path.read_text())
+    except (OSError, yaml.YAMLError) as error:
+        raise ConfigError(f"{path}: could not be read: {error}") from error
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{path}: expected a YAML mapping at the top level")
+    if raw.get("body") != station.arm:
+        raise ConfigError(f"{path} is for a {raw.get('body')!r} body; this station's arms are {station.arm!r}")
+    home = {}
+    for side, section in _DREAM_SECTIONS.items():
+        arm = raw.get(section)
+        if not isinstance(arm, dict):
+            raise ConfigError(f"{path} has no '{section}' section")
+        port = station.arms[side].port
+        if arm.get("can_channel") != port:
+            raise ConfigError(
+                f"{path}: '{section}.can_channel' is {arm.get('can_channel')!r}, but 'arms.{side}.port' is {port!r}: "
+                "the two configs do not name the same arm"
+            )
+        value = arm.get("home")
+        try:
+            joints = np.asarray(value if isinstance(value, list) else [], dtype=float)
+        except (TypeError, ValueError) as error:
+            raise ConfigError(f"{path}: '{section}.home' must be six joint angles in radians: {error}") from error
+        if joints.shape != (6,) or not np.all(np.isfinite(joints)) or np.any(np.abs(joints) > np.pi):
+            raise ConfigError(f"{path}: '{section}.home' must be six joint angles in radians, each within pi")
+        home[side] = joints
+    return home
+
+
 def load(path: str | pathlib.Path) -> StationConfig:
     """Reads and checks a station config.
 
