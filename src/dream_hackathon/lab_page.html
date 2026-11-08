@@ -44,9 +44,10 @@
   .muted { color: var(--muted); }
   #msg { min-height: 1.4em; }
   #msg.err { color: var(--bad); }
-  #alert { display: flex; gap: 12px; align-items: flex-start; margin: 0 0 12px; padding: 10px 14px; border-radius: 8px;
+  #alerts { display: contents; }
+  .alert { display: flex; gap: 12px; align-items: flex-start; margin: 0 0 12px; padding: 10px 14px; border-radius: 8px;
     border: 2px solid var(--bad); background: color-mix(in srgb, var(--bad) 12%, var(--bg, transparent)); }
-  #alert b { color: var(--bad); } #alert span { flex: 1; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .alert b { color: var(--bad); } .alert span { flex: 1; white-space: pre-wrap; overflow-wrap: anywhere; }
   .now { margin-top: 10px; padding: 10px; border: 1px dashed var(--line); border-radius: 8px; white-space: pre-wrap; }
   textarea, input[type=text], input[type=number] {
     font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
@@ -75,7 +76,7 @@
     <button id="home-link" title="Back to the prompts page">Home</button>
   </header>
 
-  <div id="alert" role="alert" hidden><span id="alert-text"></span><button id="alert-fix" hidden>Clear gripper fault</button><button id="alert-x">Dismiss</button></div>
+  <div id="alerts" role="alert"></div>
 
   <section class="panel" id="live">
     <div class="row" style="margin-bottom:10px">
@@ -138,14 +139,31 @@ async function post(path, body) {
   refresh();
   return data;
 }
-let alertSeen = 0;
-function alertShow(text, id) {
-  $('alert-text').textContent = text; $('alert').hidden = false;
-  $('alert-fix').hidden = !/gripper|fault|powered from an earlier session/i.test(text);
-  if (id) alertSeen = id;
+let alertList = [];          // what the page shows: the server's alerts and this page's own refusals
+let dismissed = new Set();   // server alert ids the person closed
+let localId = 0;
+function alertShow(text) { alertList.push({ id: 'l' + (++localId), text }); alertsRender(); }
+function alertsSync(server) {
+  const mine = alertList.filter((a) => String(a.id).startsWith('l'));
+  alertList = [...server.filter((a) => !dismissed.has(a.id)), ...mine];
+  alertsRender();
 }
-$('alert-x').onclick = () => { $('alert').hidden = true; };
-$('alert-fix').onclick = () => post('/api/arms/clear_fault');
+function alertsRender() {
+  const key = JSON.stringify(alertList);
+  if (key === alertsRender.last) return;
+  alertsRender.last = key;
+  $('alerts').replaceChildren(...alertList.map((a) => {
+    const d = document.createElement('div'); d.className = 'alert';
+    const t = document.createElement('span'); t.textContent = a.text; d.append(t);
+    if (/gripper|fault|powered from an earlier session/i.test(a.text)) {
+      const fix = document.createElement('button'); fix.textContent = 'Clear gripper fault';
+      fix.onclick = () => post('/api/arms/clear_fault'); d.append(fix);
+    }
+    const x = document.createElement('button'); x.textContent = 'Dismiss';
+    x.onclick = () => { dismissed.add(a.id); alertList = alertList.filter((o) => o !== a); alertsRender(); };
+    d.append(x); return d;
+  }));
+}
 function say(text, err) { const m = $('msg'); m.textContent = text || ''; m.className = 'grow ' + (err ? 'err' : 'muted'); }
 
 function ask(text, action) {
@@ -181,7 +199,7 @@ function renderStatus() {
   $('b-home').disabled = !['idle', 'holding', 'weightless'].includes(st);
   $('b-off').disabled = !['holding', 'weightless'].includes(st);
   $('b-stop').disabled = st !== 'running';
-  if (s.alert && s.alert.id !== alertSeen) alertShow(s.alert.text, s.alert.id);
+  alertsSync(s.alerts || []);
   const now = $('now');
   if (s.run) {
     now.hidden = false;

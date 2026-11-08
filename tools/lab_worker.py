@@ -117,9 +117,9 @@ class DreamBackend:
                     opened[name] = self.body.open_arm(arm_config, name)
             except Exception as error:
                 self.fault_text = str(error)
-                for arm in opened.values():
+                for arm in opened.values():  # an arm left energized here would refuse the next open
                     with contextlib.suppress(Exception):
-                        arm.close()
+                        arm.torque_off()
                 raise
             self.arms = opened
 

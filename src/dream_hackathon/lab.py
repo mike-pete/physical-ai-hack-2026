@@ -47,6 +47,7 @@ STOP_GRACE_S = 15.0
 MAX_BODY_BYTES = 16384
 REQUEST_TIMEOUT_S = 10
 
+MAX_ALERTS = 8
 STATES = ("starting", "idle", "weightless", "holding", "homing", "running", "stopped")
 ## Where each command may start from. Run asks for a held pose so a run never starts from a limp arm by accident.
 ALLOWED = {
@@ -162,7 +163,7 @@ class Lab:
         self.cameras: list[str] = []
         self.run: dict[str, Any] | None = None
         self._run_started = 0.0
-        self.alert: dict[str, Any] | None = None  # the last thing that went wrong; the page shows it until dismissed
+        self.alerts: list[dict[str, Any]] = []  # what went wrong, newest last; the page shows them until dismissed
         self._alerts = 0
         self._timer: threading.Timer | None = None
 
@@ -198,7 +199,7 @@ class Lab:
 
     def _alert(self, text: str) -> None:
         self._alerts += 1
-        self.alert = {"id": self._alerts, "text": text}
+        self.alerts = [*self.alerts[-(MAX_ALERTS - 1) :], {"id": self._alerts, "text": text}]
         print(f"ALERT: {text}")
 
     def _set(self, state: str, message: str) -> None:
@@ -301,7 +302,8 @@ class Lab:
             return {
                 "state": self.state,
                 "message": self.message,
-                "alert": self.alert,
+                "alert": self.alerts[-1] if self.alerts else None,
+                "alerts": list(self.alerts),
                 "cameras": list(self.cameras),
                 "run": None
                 if run is None
