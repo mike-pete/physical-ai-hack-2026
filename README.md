@@ -9,7 +9,7 @@ No Quest? Take the **left arm** in your hand and the **right arm** copies it, wh
 uv run python scripts/mirror_collect.py --config configs/station.yaml --task "pick up the red cube" --gravity
 ```
 
-Read the guide's safety notes first: the right arm is energized and follows the left arm from the moment the script opens it. Leave out `--gravity` on a Maker arm station.
+Read the guide's safety notes first: the right arm is energized and follows the left arm from the moment the script opens it. Leave out `--gravity` on a Maker arm station. A Metal station with a Star Arm 102 leader can lead the right arm with that instead: **[docs/star_leader.md](docs/star_leader.md)**.
 
 Put Dream-1, the Dream Labs robot model, to work on a pair of robot arms: run it as it is, build your own project on the Dream API, or teach it your task with demonstrations you record with a Meta Quest and fine-tune it on them (optional).
 
