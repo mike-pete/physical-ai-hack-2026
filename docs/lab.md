@@ -72,3 +72,7 @@ The Sequences tab chains saved prompts: each step is a prompt and a time in seco
 
 - `LinAlgError: SVD did not converge` is Dream's IK failing on a reply it cannot turn into rotations, usually before the first chunk. The arms are holding; the worker reopens the model and tries again twice, and the run fails only if all three tries do. The cause is not known.
 - `action buffer empty for N consecutive ticks` means the model stopped answering for 20 s (or its session expired). Answers later than 3 s are discarded and asked for again, so a slow server shows up as the arms waiting. Check the station's network first: a big download on it (an install, a sync) slows every answer.
+
+## Keeping the model warm
+
+Dream can stop an idle model; its first `get_action` is then refused `pool_warming` while it starts (none has been seen on this station). `scripts/lab_keepwarm.py` pings it: every 4 minutes, while the arms are holding a pose and no run is under way, it runs a 5 second **Dry run** of the prompt "Keep the model warm: stay still." Nothing is sent to the arms. Each ping uses Dream quota and shows in the Runs tab. Start it beside `dhk-lab` with `uv run python scripts/lab_keepwarm.py` (`--interval 120` changes the gap, `--once` pings once); stop it with Ctrl+C.

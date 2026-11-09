@@ -61,3 +61,29 @@ def test_stop_run_only_stops_a_run(client):
     the_lab.on_event({"event": "state", "state": "running"})
     assert api.stop_run().startswith("Stopping the run")
     assert [c["cmd"] for c in the_lab.worker.sent] == ["stop"]
+
+
+def test_keep_warm_runs_a_short_dry_run_and_adds_its_prompt_once(client):
+    the_lab, api = client
+    the_lab.on_event({"event": "state", "state": "holding"})
+    assert api.keep_warm() == "Pinged the model with a dry run."
+    run = the_lab.worker.sent[-1]
+    assert run["cmd"] == "run" and run["dry_run"] is True and run["max_seconds"] == lab_client.KEEP_WARM_SECONDS
+    assert run["prompt"] == lab_client.KEEP_WARM_PROMPT
+    the_lab.on_event({"event": "run_ended", "status": "finished", "error": ""})
+    the_lab.on_event({"event": "state", "state": "holding"})
+    assert api.keep_warm() == "Pinged the model with a dry run."
+    assert [p["text"] for p in the_lab.store.prompts()].count(lab_client.KEEP_WARM_PROMPT) == 1
+
+
+def test_keep_warm_skips_unless_the_arms_are_holding(client):
+    the_lab, api = client
+    assert api.keep_warm().startswith("Skipped: the arms are idle")
+    the_lab.on_event({"event": "state", "state": "running"})
+    assert api.keep_warm().startswith("Skipped: the arms are running")
+    assert the_lab.worker.sent == []
+    assert the_lab.store.prompts() == []
+
+
+def test_keep_warm_says_when_the_lab_is_unreachable():
+    assert lab_client.LabClient("http://127.0.0.1:9").keep_warm().startswith("Skipped: cannot reach the lab")

@@ -18,6 +18,9 @@ URL_ENV = "DHK_LAB_URL"
 ACTION_HEADER = "X-Lab-Dashboard"
 ## How long a stopped run may take to settle: the worker stops the loop, closes the model and holds the arms.
 SETTLE_WAIT_S = 30.0
+## The prompt a keep-warm ping runs, as a dry run: a few seconds of the model looking at the scene, no arm moves.
+KEEP_WARM_PROMPT = "Keep the model warm: stay still."
+KEEP_WARM_SECONDS = 5
 
 
 class LabClient:
@@ -33,10 +36,10 @@ class LabClient:
         if host not in ("127.0.0.1", "localhost", "::1"):
             raise ValueError(f"the lab is reached on this computer only, not at {self.url}")
 
-    def _call(self, method: str, path: str) -> dict[str, Any]:
+    def _call(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         request = urllib.request.Request(
             self.url + path,
-            data=b"{}" if method == "POST" else None,
+            data=json.dumps(body or {}).encode() if method == "POST" else None,
             method=method,
             headers={ACTION_HEADER: "1", "Content-Type": "application/json"},
         )
@@ -103,3 +106,33 @@ class LabClient:
             if reply.get("ok")
             else f"Not stopped: {reply.get('error')}."
         )
+
+    def keep_warm(self) -> str:
+        """Pings the model with a short dry run, so it is running when a real run starts.
+
+        Only when the arms are holding a pose and no run is under way; a dry run sends nothing to the arms. It is
+        recorded in the Runs tab like any run, under the prompt KEEP_WARM_PROMPT (added on the first ping).
+
+        @return What was done, or why it was not, in one sentence.
+        """
+        status = self.status()
+        if status.get("ok") is False:
+            return f"Skipped: {status['error']}"
+        if status.get("state") != "holding":
+            return f"Skipped: the arms are {status.get('state')}, not holding a pose."
+        prompts = self._call("GET", "/api/prompts")
+        if isinstance(prompts, dict):  # an error answer, not the list
+            return f"Skipped: {prompts.get('error', 'the lab did not list its prompts')}."
+        found = next((p for p in prompts if p.get("text") == KEEP_WARM_PROMPT), None)
+        if found is None:
+            reply = self._call("POST", "/api/prompts", {"text": KEEP_WARM_PROMPT})
+            if not reply.get("ok"):
+                return f"Skipped: could not add the keep-warm prompt ({reply.get('error')})."
+            prompts = self._call("GET", "/api/prompts")
+            found = next((p for p in prompts if p.get("text") == KEEP_WARM_PROMPT), None)
+            if found is None:
+                return "Skipped: the keep-warm prompt was not found after adding it."
+        reply = self._call(
+            "POST", f"/api/prompts/{found['id']}/run", {"dry_run": True, "max_seconds": KEEP_WARM_SECONDS}
+        )
+        return "Pinged the model with a dry run." if reply.get("ok") else f"Skipped: {reply.get('error')}."
