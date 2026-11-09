@@ -2,8 +2,8 @@
 
 Run beside `dhk-lab` (the repo's own environment: `uv run python scripts/lab_keepwarm.py`). Every INTERVAL seconds,
 while the arms are holding a pose and no run is under way, it asks the lab for a 5 second dry run: the model looks at
-the scene and answers, and nothing is sent to the arms. Each ping uses the Dream account's quota and appears in the Runs
-tab under the prompt "Keep the model warm: stay still."
+the scene and answers, and nothing is sent to the arms. Each ping uses the Dream account's quota and appears in the
+Runs tab under the prompt "Keep the model warm: stay still."
 
 Stop with Ctrl+C. It touches nothing but the lab's own HTTP API.
 """
