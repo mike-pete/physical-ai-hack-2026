@@ -12,6 +12,15 @@ again, saves it; B discards it; the right joystick click sends both arms back to
 recording). Ctrl+C ends the session: an episode still recording is discarded, and the arms return to where they
 started before the vendor's shutdown releases them.
 
+The dashboard's "Start episode", "Save episode" and "Discard episode" do what A and B do, through the same code
+(SessionControls queues them for the loop). Its "Reset arms to home" MOVES both arms, at HOME_SPEED_RAD_S, to
+Dream-1's home pose (config.dream_home(): `follower_l.home` / `follower_r.home` in the config `dreamcli setup`
+wrote) and opens the grippers; the emergency stop halts it. With "Reset to home after each episode" ticked (the
+default), that reset starts by itself after an episode is saved or discarded with B or the dashboard (not after a
+camera error discards one, nor at the end of the session). A reset is refused while recording, in a dry run, and
+when there is no usable home (the session says why at the start); no episode starts while the arms are moving to a
+home.
+
 Starting: the dashboard comes up first, before any device is opened. The session then waits for the Quest, the
 cameras and the arms' links, showing what each needs on the page and in the terminal (devices.py), and opens the
 arms only once everything is ready and A is pressed on the right controller (wait_and_open_arms()). During the
@@ -58,10 +67,12 @@ from dream_hackathon import (
     teleop,
 )
 
-## Homing and the end-of-session return move every joint at most this fast.
+## Homing, a reset to Dream-1's home and the end-of-session return move every joint at most this fast.
 HOME_SPEED_RAD_S = 0.5
-## Homing is done when every joint is this close to its start.
+## Homing is done when every joint is this close to its target.
 HOME_TOLERANCE_RAD = 1e-3
+## A reset opens the grippers this fast (0 closed to 1 open, per second), as Dream's own homing opens them.
+GRIP_OPEN_SPEED_PER_S = 1.0
 ## A live arm whose measured joints fall this far behind the command is re-synced and its clutch released.
 MAX_TRACKING_ERROR_RAD = 0.35
 ## Homing gives up (and the arms stop where they are) after this long.
@@ -93,18 +104,32 @@ A_AFTER_READY_S = 1.0
 FrameSource = Callable[[], dict[str, npt.NDArray[np.uint8]]]
 
 
+## What the dashboard's episode buttons ask the loop for (SessionControls.request()): the Quest's A (start, save),
+## B (discard), and a reset of both arms to Dream-1's home.
+SESSION_ACTIONS = ("start", "save", "discard", "reset")
+## The dashboard's "Reset to home after each episode" checkbox: a setting, not a request to the loop.
+AUTO_RESET_ACTIONS = {"auto-reset-on": True, "auto-reset-off": False}
+
+
 class SessionControls:
-    """What the dashboard can change in a session: the task text new episodes record, and the dataset's episodes.
+    """What the dashboard can change in a session: the task text, the dataset's episodes, and the episode buttons.
 
     Shared by the control loop and the dashboard's threads. The dataset is guarded by `lock`: the collector holds it
     while an episode records, and a delete takes it without waiting, so a delete is refused while an episode records
     and no episode starts while a delete runs. A delete renumbers the later episodes (Dream wants 0, 1, 2, ...) and
     reloads the writer from the folder, so the next episode is numbered right.
 
+    The episode buttons never touch the collector from the dashboard's thread: request() queues them, and the loop
+    takes them (take_requests()) at the start of its next tick, beside the Quest's buttons, and logs what came of
+    each. Requests are taken only while `accepting`, which the session sets once the arms are open and clears before
+    it shuts down.
+
     Attributes:
     - task: The task text the next episode records.
     - writer: The dataset's writer.
     - lock: Held while an episode records, or while episodes are deleted.
+    - auto_reset: Whether the arms go to Dream-1's home after an episode is saved or discarded by the operator.
+    - accepting: Whether the loop runs and takes requests.
     """
 
     def __init__(self, make_writer: Callable[[], dataset.DatasetWriter], task: str) -> None:
@@ -113,6 +138,43 @@ class SessionControls:
         self.writer = make_writer()
         self.task = task
         self.lock = threading.Lock()
+        self.auto_reset = True
+        self._accepting = False
+        self._requests: list[str] = []
+        self._requests_lock = threading.Lock()
+
+    @property
+    def accepting(self) -> bool:
+        return self._accepting
+
+    @accepting.setter
+    def accepting(self, value: bool) -> None:
+        with self._requests_lock:
+            self._accepting = value
+            if not value:
+                self._requests.clear()  # never carried over into a later session, or acted on at shutdown
+
+    def request(self, action: str) -> tuple[bool, str]:
+        """Queues one of SESSION_ACTIONS for the loop, or sets the auto-reset checkbox (AUTO_RESET_ACTIONS).
+
+        @return Whether it was taken, and what happened; what the loop then does with a request, it logs.
+        """
+        if action in AUTO_RESET_ACTIONS:
+            self.auto_reset = AUTO_RESET_ACTIONS[action]
+            return True, f"reset to home after each episode: {'on' if self.auto_reset else 'off'}"
+        if action not in SESSION_ACTIONS:
+            return False, f"unknown session action {action!r}"
+        with self._requests_lock:
+            if not self._accepting:
+                return False, "the arms are not open yet: press A on the right controller first"
+            self._requests.append(action)
+        return True, f"{action}: requested"
+
+    def take_requests(self) -> list[str]:
+        """The requests queued since the last call, oldest first; called by the loop."""
+        with self._requests_lock:
+            requests, self._requests = self._requests, []
+        return requests
 
     def set_task(self, text: str) -> tuple[bool, str]:
         """Sets the task text the next episode records; an empty text goes back to DEFAULT_TASK."""
@@ -156,8 +218,14 @@ class _Command:
 class Collector:
     """The teleop-and-record loop over injected devices, one tick at a time (tick()).
 
+    Homing has a target: where the arms started (the right joystick, and the end-of-session return, which the
+    arms' close() needs), or Dream-1's home for a reset (the dashboard's "Reset arms to home", or the automatic reset
+    after an episode), which also opens the grippers. No episode starts while the arms are homing, so that motion is
+    never recorded.
+
     Attributes:
-    - homing: Whether the arms are on their way back to where they started.
+    - homing: Whether the arms are on their way to a home: their start, or Dream-1's home.
+    - resetting: Whether that home is Dream-1's (a reset).
     - episode: The episode being recorded, or None.
     """
 
@@ -172,6 +240,8 @@ class Collector:
         writer: dataset.DatasetWriter,
         log: Callable[[str], None] = print,
         controls: SessionControls | None = None,
+        home: arms.Joints | None = None,
+        home_note: str = "no home pose was given",
     ) -> None:
         """Holds the devices; the command starts where the arms are.
 
@@ -183,7 +253,10 @@ class Collector:
         @param iks Per side, the teleop IK.
         @param writer The dataset episodes are saved to.
         @param log Where events are reported.
-        @param controls The task and dataset the dashboard can change; None keeps `task` and `writer` as they are.
+        @param controls The task, dataset and requests the dashboard can change; None keeps `task` and `writer` as
+            they are.
+        @param home Per side, Dream-1's home (config.dream_home()), where a reset takes the arms; None offers no reset.
+        @param home_note Why there is no `home`, for the dashboard.
         """
         self._station = station
         self._controls = controls or SessionControls(lambda: writer, task)
@@ -208,7 +281,11 @@ class Collector:
             for side, arm in station.arms.items()
         }
         self._warnings: list[tuple[float, str]] = []
+        self._home = None if home is None else {side: np.asarray(q, dtype=float).copy() for side, q in home.items()}
+        self._home_note = home_note
+        self._home_target: arms.Joints = robot.start_joints
         self.homing = False
+        self.resetting = False
         self.episode: dataset.Episode | None = None
 
     def tick(self) -> None:
@@ -216,6 +293,7 @@ class Collector:
         measured, measured_grips = self._robot.read()
         state = self._headset.read()
         self._handle_buttons(state.pressed)
+        self._handle_requests(self._controls.take_requests())
         if self.homing:
             self._step_home()
         else:
@@ -229,7 +307,7 @@ class Collector:
             except cameras.CameraError as error:
                 # An episode missing a camera's frames cannot train; teleop goes on, and the next one can record.
                 self._warn(f"{error}: the episode is discarded")
-                self.discard()
+                self.discard()  # not the operator's: the arms stay where they are
             else:
                 self.episode.add_frame(
                     layouts.to_vector(self._station.arm, measured, measured_grips),
@@ -242,7 +320,9 @@ class Collector:
         """The session's state, for the dashboard and the status line; call it from the loop's thread (it runs FK).
 
         @return A JSON-ready dict: `mode`, `recording`, `frames`, `seconds`, `episodes`, `task`, `dataset`, `homing`,
-            per side under `arms` its `engaged`, `tool_m` and `grip`, the recent `warnings`, and `control_hz`.
+            `resetting`, `auto_reset`, `can_reset` (whether a reset is possible at all: live arms and a known home)
+            with `reset_note` (why not, or ``), per side under `arms` its `engaged`, `tool_m` and `grip`, the recent
+            `warnings`, and `control_hz`.
         """
         now = time.monotonic()
         self._warnings = [(when, text) for when, text in self._warnings if now - when < WARNING_SHOWN_S]
@@ -264,14 +344,21 @@ class Collector:
             "task": self._controls.task,
             "dataset": str(self._controls.writer.root),
             "homing": self.homing,
+            "resetting": self.resetting,
+            "auto_reset": self._controls.auto_reset,
+            "can_reset": self._reset_refusal() is None,
+            "reset_note": self._reset_refusal() or "",
             "arms": per_arm,
             "warnings": [text for _, text in self._warnings],
             "control_hz": self._station.control_hz,
         }
 
     def go_home(self, timeout_s: float = HOME_TIMEOUT_S) -> None:
-        """Brings the arms back to where they started at HOME_SPEED_RAD_S, ticking until they arrive or time is up."""
-        self.homing = True
+        """Brings the arms back to where they started at HOME_SPEED_RAD_S, ticking until they arrive or time is up.
+
+        Always to where they started, also during a reset: the arms' close() needs them there.
+        """
+        self._start_homing(self._robot.start_joints, reset=False)
         deadline_s = time.monotonic() + timeout_s
         while self.homing:
             if time.monotonic() > deadline_s:
@@ -287,7 +374,7 @@ class Collector:
             time.sleep(max(0.0, self._dt_s - (time.perf_counter() - started_s)))
 
     def discard(self) -> None:
-        """Drops the episode being recorded, if any."""
+        """Drops the episode being recorded, if any; never starts a reset (a camera error, the shutdown)."""
         if self.episode is not None:
             try:
                 self.episode.discard()
@@ -296,24 +383,88 @@ class Collector:
                 self._controls.lock.release()
             self._log("episode discarded")
 
+    def _discard_by_operator(self) -> None:
+        """B, or the dashboard's Discard: drops the episode, then resets the arms when auto-reset is on."""
+        if self.episode is None:
+            return
+        self.discard()
+        self._auto_reset()
+
     def _handle_buttons(self, pressed: frozenset[str]) -> None:
         if "A" in pressed:
             self._toggle_recording()
         if "B" in pressed:
-            self.discard()
+            self._discard_by_operator()
         if "RJ" in pressed:
             if self.episode is not None:
                 self._log("homing is off while recording: save (A) or discard (B) first")
             else:
-                self.homing = True
-                for clutch in self._clutches.values():
-                    clutch.engaged = False
+                self._start_homing(self._robot.start_joints, reset=False)
+
+    def _handle_requests(self, requests: list[str]) -> None:
+        """The dashboard's episode buttons, through the same code paths as the Quest's."""
+        for action in requests:
+            if action == "start":
+                if self.episode is not None:
+                    self._log("an episode is already recording: save or discard it first")
+                else:
+                    self._toggle_recording()
+            elif action == "save":
+                if self.episode is None:
+                    self._log("no episode is recording: nothing to save")
+                else:
+                    self._toggle_recording()
+            elif action == "discard":
+                if self.episode is None:
+                    self._log("no episode is recording: nothing to discard")
+                else:
+                    self._discard_by_operator()
+            elif action == "reset":
+                self._reset()
+
+    def _reset_refusal(self) -> str | None:
+        """Why a reset to Dream-1's home is not possible in this session, or None when it is."""
+        if not self._robot.energized:
+            return "a dry run never moves the arms"
+        if self._home is None:
+            return f"reset to home is off: {self._home_note}"
+        return None
+
+    def _reset(self) -> bool:
+        """Starts moving both arms to Dream-1's home, opening the grippers; logs why not when it cannot."""
+        if self.episode is not None:
+            self._log("reset is off while recording: save or discard the episode first")
+            return False
+        refusal = self._reset_refusal()
+        if refusal is not None:
+            self._log(f"no reset: {refusal}")
+            return False
+        assert self._home is not None
+        self._start_homing(self._home, reset=True)
+        self._log("resetting the arms to Dream-1's home (the emergency stop halts them)")
+        return True
+
+    def _auto_reset(self) -> None:
+        """After an operator's save or discard: a reset, when the checkbox is on and one is possible."""
+        if self._controls.auto_reset and self._reset_refusal() is None:
+            self._reset()
+
+    def _start_homing(self, target: arms.Joints, *, reset: bool) -> None:
+        """Moves the arms toward `target` from the next step on, with the clutches released."""
+        self._home_target = target
+        self.homing = True
+        self.resetting = reset
+        for clutch in self._clutches.values():
+            clutch.engaged = False
 
     def _toggle_recording(self) -> None:
         controls = self._controls
         if self.episode is None:
             if not self._robot.energized:
                 self._log("a dry run does not record")
+                return
+            if self.homing:
+                self._log("the arms are moving to home: wait until they stop")
                 return
             # Held until the episode is saved or discarded, so the dashboard cannot delete episodes under it.
             if not controls.lock.acquire(blocking=False):
@@ -335,6 +486,7 @@ class Collector:
         finally:
             controls.lock.release()
         self._log(f"saved episode {index} ({episode.frames} frames); {controls.writer.total_episodes} in the dataset")
+        self._auto_reset()
 
     def _follow(self, state: "quest.QuestState", measured: arms.Joints) -> None:
         """Moves each arm's command toward its clutch's target; a released clutch holds it.
@@ -354,14 +506,22 @@ class Collector:
             self._command.grips[side] = 1.0 - state.trigger[side]
 
     def _step_home(self) -> None:
+        """One step toward the homing target at HOME_SPEED_RAD_S; a reset also opens the grippers."""
         max_step = HOME_SPEED_RAD_S * self._dt_s
         done = True
-        for side, start in self._robot.start_joints.items():
-            joints = teleop.step_toward(self._command.joints[side], start, max_step)
+        for side, target in self._home_target.items():
+            joints = teleop.step_toward(self._command.joints[side], target, max_step)
             self._command.joints[side] = joints
-            done = done and bool(np.all(np.abs(joints - start) <= HOME_TOLERANCE_RAD))
+            done = done and bool(np.all(np.abs(joints - target) <= HOME_TOLERANCE_RAD))
+            if self.resetting:
+                grip = min(1.0, self._command.grips[side] + GRIP_OPEN_SPEED_PER_S * self._dt_s)
+                self._command.grips[side] = grip
+                done = done and grip >= 1.0
         if done:
+            if self.resetting:
+                self._log("the arms are at Dream-1's home")
             self.homing = False
+            self.resetting = False
 
     def _warn(self, text: str) -> None:
         """Logs a warning and shows it on the dashboard for WARNING_SHOWN_S."""
@@ -466,12 +626,31 @@ def _run_locked(
         log(f"dashboard: {message}")
         return ok, message
 
+    def session(action: str) -> tuple[bool, str]:
+        ok, message = controls.request(action)
+        log(f"dashboard: {message}")
+        return ok, message
+
     board = _open_dashboard(
-        station, frame, port, on_fix=fix, on_task=set_task, on_delete=delete, task_of=lambda: controls.task
+        station,
+        frame,
+        port,
+        on_fix=fix,
+        on_task=set_task,
+        on_delete=delete,
+        on_session=session,
+        task_of=lambda: controls.task,
     )
 
     monitor = None
     try:
+        # Read before the arms open: whatever it finds, the session goes on (a reset is then refused, saying why).
+        try:
+            home, home_note = config.dream_home(station), ""
+            log("reset: Dream-1's home from ~/.dreamlabs/station.yaml")
+        except config.ConfigError as error:
+            home, home_note = None, str(error)
+            log(f"reset to home is off: {error}")
         reported: dict[str, str | None] = {}
         try:
             robot = wait_and_open_arms(station, found, board, log, dry_run=dry_run, sim=sim, reported=reported)
@@ -482,10 +661,22 @@ def _run_locked(
         collector = None
         try:
             collector = Collector(
-                station, controls.task, robot, found.headset, frames, iks, controls.writer, log=log, controls=controls
+                station,
+                controls.task,
+                robot,
+                found.headset,
+                frames,
+                iks,
+                controls.writer,
+                log=log,
+                controls=controls,
+                home=home,
+                home_note=home_note,
             )
+            controls.accepting = True
             _loop(collector, 1.0 / station.control_hz, board)
         finally:
+            controls.accepting = False  # the dashboard's requests stop here; the shutdown below takes none
             # From here the shutdown runs to its end: a hang-up, a kill or another Ctrl+C would leave the arms
             # wherever they are. The emergency stop is the way to halt it.
             for stop_signal in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
@@ -648,6 +839,7 @@ def _open_dashboard(
     on_fix: Callable[[str], tuple[bool, str]] | None = None,
     on_task: Callable[[str], tuple[bool, str]] | None = None,
     on_delete: Callable[[list[int]], tuple[bool, str]] | None = None,
+    on_session: Callable[[str], tuple[bool, str]] | None = None,
     task_of: Callable[[], str] | None = None,
 ) -> dashboard.Dashboard | None:
     """Starts the dashboard and says how to open it; a taken port leaves the session without one."""
@@ -663,6 +855,7 @@ def _open_dashboard(
             on_fix=on_fix,
             on_task=on_task,
             on_delete=on_delete,
+            on_session=on_session,
             task_of=task_of,
         )
     except OSError as error:
@@ -707,7 +900,7 @@ def _status_line(snapshot: dict[str, Any]) -> str:
     """The terminal's status line: what is recording, and per arm whether it is driving and where its tool is."""
     parts = [f"REC {snapshot['frames']} frames" if snapshot["recording"] else "idle"]
     if snapshot["homing"]:
-        parts.append("homing")
+        parts.append("resetting" if snapshot.get("resetting") else "homing")
     for side in ("left", "right"):
         arm = snapshot["arms"][side]
         x, y, z = arm["tool_m"]

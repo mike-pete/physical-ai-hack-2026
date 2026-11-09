@@ -57,6 +57,13 @@ Your episodes are saved in `~/hackathon_data/myteam-cubes` on the station ([wher
 | B | Throws away the episode being recorded |
 | Right joystick click | Sends both arms back to where they were when the session started (not while recording) |
 | Ctrl+C (in the terminal) | Ends the session; an episode still recording is thrown away and the arms return to their start |
+| "Start episode" (dashboard) | Same as A to start an episode |
+| "Save episode" (dashboard) | Same as A to save the episode being recorded |
+| "Discard episode" (dashboard) | Same as B |
+| "Reset arms to home" (dashboard) | **Moves both arms** to Dream-1's home pose (the one `dreamcli setup` saved) and opens the grippers. Refused while recording and in a dry run. The emergency stop halts it |
+| "Reset to home after each episode" (dashboard, ticked by default) | After you save an episode, or throw one away with B or "Discard episode", the arms reset to Dream-1's home by themselves |
+
+The dashboard's buttons work only once A has opened the arms; before that they are greyed out, and hovering over a greyed-out button says why. No episode starts while the arms are moving to a home (the right joystick, a reset, or the reset after an episode): wait until they stop, so that motion is never recorded. A reset moves the arms without your hands on the controllers: keep clear of them and keep a hand near the emergency stop. On a Metal arm the home comes from `~/.dreamlabs/station.yaml`; on other arms, or when that file is missing or does not match the station's arms, the session says "reset to home is off" with the reason when it starts, and the reset buttons stay greyed out. A camera that fails mid-episode throws the episode away without a reset, and the end of the session always returns the arms to where they started, not to Dream-1's home.
 
 The arm follows how your hand moves after you grip, not where your hand is. If you run out of reach, release, move your hand back, and grip again, like lifting a mouse off the table. The app reports each controller relative to the headset, so keep your head still and facing the arms while you grip.
 
@@ -88,10 +95,11 @@ While `dhk-collect` runs, open http://localhost:8080 in your laptop's browser. T
 - Whether an episode is recording, and for how long.
 - Each arm: driving or holding, its tool position and its gripper.
 - Warnings (a stalled camera, an arm that cannot follow) and the session's events.
+- The episode buttons: "Start episode", "Save episode", "Discard episode" (the same as A and B), "Reset arms to home", which moves both arms to Dream-1's home and opens the grippers, and the "Reset to home after each episode" checkbox ([the controls](#the-controls)).
 - The task text the next episodes record, with a box to type a new one ("Set task"). An empty one goes back to the default.
 - The episodes saved so far, with each camera's video to play back, and a checkbox on each: tick the ones you do not want and press "Delete selected" (it asks first, and is refused while an episode is recording).
 
-Tick "sound cues" and the laptop beeps when recording starts (one beep), when an episode is saved (two) or discarded (a low one). That lets a teammate at the laptop follow the operator. Nothing on the page moves the arms; its buttons fix a device, set the task, or delete the episodes you tick.
+Tick "sound cues" and the laptop beeps when recording starts (one beep), when an episode is saved (two) or discarded (a low one). That lets a teammate at the laptop follow the operator. Only "Reset arms to home", and the reset after each episode when its checkbox is ticked, move the arms from the page; the emergency stop halts them. The other buttons fix a device, start, save or discard an episode, set the task, or delete the episodes you tick.
 
 If the page does not load:
 
@@ -118,7 +126,7 @@ If the connection drops outside tmux, the session ends safely: the episode being
 
    You do not need to label the episodes: when Dream processes the dataset, its service writes dense text labels for it from the overhead camera. A task text of your own is optional: type it on the dashboard ("Set task", from the next episode on) or start with `--task "put the red cube in the bowl"`, and write it the way you will ask the robot. Without it, each episode records the neutral text `do the demonstrated task`, since the dataset format needs one.
 
-4. For each episode: set the scene, press A, do the task, press A to save. If it went wrong, press B instead and do it again.
+4. For each episode: set the scene, press A, do the task, press A to save. If it went wrong, press B instead and do it again. With "Reset to home after each episode" ticked on the dashboard (the default), the arms then move to Dream-1's home and open their grippers: wait until they stop before the next A.
 5. Press Ctrl+C when you are done. The arms return to where they started.
 
 Every session starts the same way: the dashboard lists the devices, and once every one is ready, A opens the arms. Every session adds its episodes to the same `--dataset-dir`, so you can stop and continue later, or switch operators. Use one dataset folder per task; if you name your tasks with `--task`, a different text in the same folder is fine too, when one model should learn several tasks. If a device stays red on the dashboard (an arm, a camera, the Quest), do what it says; if that does not fix it, call the organizers rather than changing the station's config. A camera that was unplugged comes back by itself once it is plugged in again.

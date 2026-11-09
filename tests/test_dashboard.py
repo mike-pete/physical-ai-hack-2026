@@ -132,3 +132,52 @@ def test_a_fix_is_taken_from_the_page_only(tmp_path: pathlib.Path) -> None:
 
 def test_a_page_without_fixes_refuses_them(board: dashboard.Dashboard) -> None:
     assert _post(board, b'{"fix": "can-up:x"}', {"X-Dashboard": "1"})[0] == 404
+
+
+def test_the_episode_buttons_are_taken_from_the_page_only(tmp_path: pathlib.Path) -> None:
+    asked = []
+    board = dashboard.Dashboard(
+        0,
+        lambda role: np.zeros((180, 320, 3), np.uint8),
+        layouts.video_keys("yam"),
+        None,
+        title="test station",
+        on_session=lambda action: asked.append(action) or (True, f"{action}: requested"),
+    )
+    try:
+        assert json.loads(_get(board, "/api/status")[1])["can_session"]
+        own = f"http://127.0.0.1:{board.port}"
+
+        def post(headers: dict[str, str]) -> tuple[int, bytes]:
+            request = urllib.request.Request(
+                f"{own}/api/session", data=b'{"action": "reset"}', headers=headers, method="POST"
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    return response.status, response.read()
+            except urllib.error.HTTPError as error:
+                return error.code, error.read()
+
+        assert post({"Content-Type": "application/json"})[0] == 403  # no X-Dashboard header
+        assert post({"X-Dashboard": "1", "Origin": "https://example.com"})[0] == 403  # another site
+        assert asked == []
+        status, reply = post({"X-Dashboard": "1", "Origin": own})
+        assert status == 200 and json.loads(reply) == {"ok": True, "message": "reset: requested"}
+        assert asked == ["reset"]
+        page = _get(board, "/")[1].decode()
+        assert all(
+            label in page for label in ("Start episode", "Save episode", "Discard episode", "Reset arms to home")
+        )
+        assert "Reset to home after each episode" in page
+    finally:
+        board.close()
+
+
+def test_a_page_without_a_session_has_no_episode_buttons(board: dashboard.Dashboard) -> None:
+    assert not json.loads(_get(board, "/api/status")[1])["can_session"]
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{board.port}/api/session", data=b'{"action": "start"}', headers={"X-Dashboard": "1"}
+    )
+    with pytest.raises(urllib.error.HTTPError) as refused:
+        urllib.request.urlopen(request, timeout=5)
+    assert refused.value.code == 404

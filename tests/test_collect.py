@@ -15,6 +15,8 @@ from dream_hackathon import cameras, collect, config, dataset, ik, layouts, ques
 
 CONFIGS = pathlib.Path(__file__).resolve().parents[1] / "configs"
 START = np.array([0.0, -0.3, 1.2, 0.6, 0.0, 0.0])  # elbow bent: 5 cm forward is in reach
+## A Dream-1 home a little away from the start, so a reset and a return to the start end in different places.
+HOME = {"left": START + [0.05, -0.05, 0.1, 0.0, 0.05, 0.0], "right": START + [-0.05, 0.05, -0.1, 0.1, 0.0, -0.05]}
 
 
 class FakeArms:
@@ -57,7 +59,14 @@ class FakeQuest:
         )
 
 
-def _collector(tmp_path: pathlib.Path, arms: FakeArms, headset: FakeQuest, logs: list[str]) -> collect.Collector:
+def _collector(
+    tmp_path: pathlib.Path,
+    arms: FakeArms,
+    headset: FakeQuest,
+    logs: list[str],
+    home: dict | None = None,
+    home_note: str = "no home pose was given",
+) -> collect.Collector:
     station = config.load(filled_template("yam", tmp_path))
     # A box large enough that it never clamps the test arm's tool.
     roomy = {
@@ -73,7 +82,18 @@ def _collector(tmp_path: pathlib.Path, arms: FakeArms, headset: FakeQuest, logs:
     writer = dataset.DatasetWriter(station.dataset_dir, 30, "yam", [f"v{i}" for i in range(14)], keys, 320, 180)
     frame = np.zeros((180, 320, 3), np.uint8)
     frames = lambda: {role: frame for role in layouts.CAMERA_ROLES}  # noqa: E731
-    return collect.Collector(station, "pick up the cube", arms, headset, frames, iks, writer, log=logs.append)
+    return collect.Collector(
+        station,
+        "pick up the cube",
+        arms,
+        headset,
+        frames,
+        iks,
+        writer,
+        log=logs.append,
+        home=home,
+        home_note=home_note,
+    )
 
 
 def test_a_held_grip_drives_the_tool_with_the_hand(tmp_path: pathlib.Path) -> None:
@@ -227,3 +247,190 @@ def test_a_missing_tool_center_point_is_one_line_not_a_traceback(tmp_path: pathl
     with pytest.raises(SystemExit) as stopped:
         collect.main(["--config", str(path), "--dataset-dir", str(tmp_path / "data")])
     assert str(stopped.value.code).startswith("config: 'arms.left.tcp_xyz_m' is not set")
+
+
+def _accepting(collector: collect.Collector) -> collect.SessionControls:
+    """The collector's controls, taking requests as they do once a session's arms are open."""
+    collector._controls.accepting = True
+    return collector._controls
+
+
+def _record(collector: collect.Collector) -> None:
+    """Ticks long enough for an episode Dream accepts (60 Hz loop, every 2nd tick recorded)."""
+    for _ in range(2 * dataset.min_frames(30)):
+        collector.tick()
+
+
+def _settle(collector: collect.Collector, ticks: int = 120) -> None:
+    for _ in range(ticks):
+        collector.tick()
+
+
+def test_the_dashboard_starts_saves_and_discards_like_a_and_b(tmp_path: pathlib.Path) -> None:
+    arms_, headset, logs = FakeArms(), FakeQuest(), []
+    collector = _collector(tmp_path, arms_, headset, logs)
+    controls = _accepting(collector)
+    assert controls.request("save") == (True, "save: requested")
+    collector.tick()
+    assert logs[-1] == "no episode is recording: nothing to save"
+    controls.request("start")
+    collector.tick()
+    assert collector.episode is not None and logs[-1].startswith("recording episode 0")
+    controls.request("start")
+    collector.tick()
+    assert logs[-1] == "an episode is already recording: save or discard it first"
+    _record(collector)
+    controls.request("save")
+    collector.tick()
+    assert collector.episode is None and logs[-1].startswith("saved episode 0")
+    assert controls.writer.total_episodes == 1
+    controls.request("start")
+    collector.tick()
+    controls.request("discard")
+    collector.tick()
+    assert collector.episode is None and logs[-1] == "episode discarded" and not controls.lock.locked()
+    assert controls.writer.total_episodes == 1
+
+
+def test_a_request_before_the_arms_open_is_refused_not_queued(tmp_path: pathlib.Path) -> None:
+    arms_, headset, logs = FakeArms(), FakeQuest(), []
+    collector = _collector(tmp_path, arms_, headset, logs)
+    controls = collector._controls
+    ok, message = controls.request("start")
+    assert not ok and "press A on the right controller first" in message
+    controls.accepting = True
+    collector.tick()
+    assert collector.episode is None  # the refused request was not kept for later
+    assert not controls.request("jump")[0]
+    assert controls.request("auto-reset-off") == (True, "reset to home after each episode: off")
+    assert not controls.auto_reset
+    controls.request("start")
+    controls.accepting = False  # the session ends: what is queued is dropped
+    assert controls.take_requests() == []
+
+
+def test_a_reset_reaches_dreams_home_with_the_grippers_open(tmp_path: pathlib.Path) -> None:
+    arms_, headset, logs = FakeArms(), FakeQuest(), []
+    collector = _collector(tmp_path, arms_, headset, logs, home=HOME)
+    controls = _accepting(collector)
+    collector._command.grips.update(left=0.0, right=0.2)  # grippers closed
+    controls.request("reset")
+    collector.tick()
+    assert collector.homing and collector.resetting and "resetting the arms" in logs[-1]
+    assert collector.snapshot()["resetting"] and collect._status_line(collector.snapshot()).find("resetting") > 0
+    _settle(collector)
+    assert not collector.homing and not collector.resetting and logs[-1] == "the arms are at Dream-1's home"
+    for side in ("left", "right"):
+        np.testing.assert_allclose(arms_.joints[side], HOME[side], atol=1e-3)
+    assert arms_.grips == {"left": 1.0, "right": 1.0}
+
+
+def test_a_reset_is_refused_while_recording_in_a_dry_run_and_without_a_home(tmp_path: pathlib.Path) -> None:
+    arms_, headset, logs = FakeArms(), FakeQuest(), []
+    collector = _collector(tmp_path, arms_, headset, logs, home=HOME)
+    controls = _accepting(collector)
+    controls.request("start")
+    collector.tick()
+    controls.request("reset")
+    collector.tick()
+    assert not collector.homing and "reset is off while recording" in logs[-1]
+
+    dry = FakeArms(energized=False)
+    collector = _collector(tmp_path, dry, headset, logs, home=HOME)
+    _accepting(collector).request("reset")
+    collector.tick()
+    assert not collector.homing and logs[-1] == "no reset: a dry run never moves the arms" and dry.commands == 0
+    assert collector.snapshot()["reset_note"] == "a dry run never moves the arms"
+
+    collector = _collector(tmp_path, FakeArms(), headset, logs, home_note="/x/station.yaml does not exist")
+    _accepting(collector).request("reset")
+    collector.tick()
+    assert not collector.homing and logs[-1] == "no reset: reset to home is off: /x/station.yaml does not exist"
+    snapshot = collector.snapshot()
+    assert not snapshot["can_reset"] and snapshot["reset_note"].endswith("does not exist")
+    json.dumps(snapshot)
+
+
+def test_auto_reset_follows_a_save_and_b_but_not_a_camera_error(tmp_path: pathlib.Path) -> None:
+    arms_, headset, logs = FakeArms(), FakeQuest(), []
+    collector = _collector(tmp_path, arms_, headset, logs, home=HOME)
+    controls = _accepting(collector)
+    assert collector.snapshot()["auto_reset"] is True  # on by default
+    headset.press.add("A")
+    _record(collector)
+    headset.press.add("A")
+    collector.tick()
+    assert any(line.startswith("saved episode 0") for line in logs) and collector.resetting
+    _settle(collector)
+    np.testing.assert_allclose(arms_.joints["left"], HOME["left"], atol=1e-3)
+
+    headset.press.add("A")
+    collector.tick()
+    headset.press.add("B")
+    collector.tick()
+    # B is the operator's discard: a reset follows (the arms are already home, so it ends in the same tick).
+    assert logs[-3:] == ["episode discarded", logs[-2], "the arms are at Dream-1's home"]
+    assert logs[-2].startswith("resetting the arms to Dream-1's home")
+    _settle(collector)
+
+    def stalled():
+        raise cameras.CameraError("camera 'wrist_l' stalled")
+
+    def resets() -> int:
+        return sum(line.startswith("resetting the arms") for line in logs)
+
+    before = resets()
+    collector._frames = stalled
+    headset.press.add("A")
+    collector.tick()
+    collector.tick()  # frames are taken on every 2nd tick
+    assert collector.episode is None and any("stalled" in line for line in logs)
+    assert resets() == before and not collector.homing  # discarded by the camera: the arms stay where they are
+
+    controls.request("auto-reset-off")
+    collector._frames = lambda: {role: np.zeros((180, 320, 3), np.uint8) for role in layouts.CAMERA_ROLES}
+    controls.request("start")
+    collector.tick()
+    controls.request("discard")
+    collector.tick()
+    assert collector.episode is None and resets() == before
+
+
+def test_no_episode_starts_while_the_arms_move_home(tmp_path: pathlib.Path) -> None:
+    arms_, headset, logs = FakeArms(), FakeQuest(), []
+    collector = _collector(tmp_path, arms_, headset, logs, home=HOME)
+    controls = _accepting(collector)
+    controls.request("reset")
+    collector.tick()
+    headset.press.add("A")
+    collector.tick()
+    assert collector.episode is None and logs[-1] == "the arms are moving to home: wait until they stop"
+    controls.request("start")
+    collector.tick()
+    assert collector.episode is None and logs[-1] == "the arms are moving to home: wait until they stop"
+    _settle(collector)
+    headset.press.add("A")
+    collector.tick()
+    assert collector.episode is not None
+
+
+def test_the_joystick_and_the_shutdown_still_return_to_the_start(tmp_path: pathlib.Path) -> None:
+    arms_, headset, logs = FakeArms(), FakeQuest(), []
+    collector = _collector(tmp_path, arms_, headset, logs, home=HOME)
+    controls = _accepting(collector)
+    controls.request("reset")
+    _settle(collector)
+    np.testing.assert_allclose(arms_.joints["right"], HOME["right"], atol=1e-3)
+    headset.press.add("RJ")
+    collector.tick()
+    assert collector.homing and not collector.resetting
+    _settle(collector)
+    np.testing.assert_allclose(arms_.joints["right"], START, atol=1e-3)
+
+    controls.request("reset")
+    collector.tick()
+    assert collector.resetting
+    collector.go_home(timeout_s=5.0)  # the end of the session, in the middle of a reset: back to the start
+    assert not collector.homing and not collector.resetting
+    for side in ("left", "right"):
+        np.testing.assert_allclose(arms_.joints[side], START, atol=1e-3)
