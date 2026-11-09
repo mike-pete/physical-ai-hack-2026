@@ -71,7 +71,7 @@ When the collector opens a YAM arm, i2rt holds it where it is. It also sweeps ea
 
 ### Metal and Maker arms
 
-Each arm has its own CAN adapter. List them with `ls -l /dev/serial/by-id/` and put each arm's path in `arms.<side>.port` (`makermods.can_interface: slcan`). With a SocketCAN adapter, use the interface name (`can0`) and `socketcan` instead.
+Each arm has its own CAN adapter. A serial adapter (a CANable on slcan firmware) shows in `ls -l /dev/serial/by-id/`: put its path in `arms.<side>.port`. A SocketCAN adapter (a candleLight, `gs_usb`) shows in `ip -br link show type can`: put its interface name (`can0`, or the `can_follower_<l|r>` name `dreamcli setup` gives it) there instead. Each arm is opened by its own port's kind, so the two arms may use different adapters; `makermods.can_interface` is kept for older configs.
 
 Before the first session:
 
@@ -158,6 +158,6 @@ Participants work on the station over SSH, with no screen. Give every team the s
 
 ## 8. Before handing the station over
 
-Record two short episodes into a throwaway folder (`--dataset-dir ~/hackathon_data/station-test`) and check them with `~/dream-env/bin/python tools/finetune.py ~/hackathon_data/station-test --arm <arm> --check`. On a Metal or Maker arm, run `tools/add_eef.py` first and check the `-eef` folder. A station whose test passes is ready for participants.
+Record two short episodes into a throwaway folder, in a live session (not `--dry-run`, which never records): `uv run dhk-collect --config configs/station.yaml --dataset-dir ~/hackathon_data/station-test`. The first A only opens the arms; then A starts an episode and A again saves it, and the terminal prints `saved episode 0`. Record a second one the same way, and quit with Ctrl+C only after `saved episode 1`: Ctrl+C discards an episode that is still recording. Then check them with `~/dream-env/bin/python tools/finetune.py ~/hackathon_data/station-test --arm <arm> --check`. On a Metal or Maker arm, run `tools/add_eef.py` first and check the `-eef` folder. A station whose test passes is ready for participants.
 
 Last, remove the setup team's API key, so no team runs or fine-tunes on it: `bash scripts/remove_api_key.sh`. It deletes the key from `~/.dreamlabs/credentials` and its backup, keeps the platform addresses, and warns about a key still set in a shell, a startup file or a running `dreamcli`. Teams then save their own key with the Setup API page's key step before they fine-tune. `dreamcli setup` registered the station for Live View under the setup key's account; `dreamcli robot run` in a terminal does not depend on that, but check Live View with a team's key before relying on it.
