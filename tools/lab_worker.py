@@ -50,6 +50,9 @@ SHUTDOWN_HOME_S = 8.0
 ## no move is made from a stale picture. A slow server only makes the arms wait, so more empty ticks are
 ## tolerated before a run stops.
 MAX_STALL_TICKS = 400  # empty-buffer ticks (20 Hz) tolerated before a run stops: 20 s
+## Dream's IK sometimes fails on a reply it cannot turn into rotations (numpy's LinAlgError, "SVD did not converge")
+## before the first chunk. The arms are holding then, so the run reopens the model and tries again this many times.
+IK_RETRIES = 2
 WARMUP_CHECKPOINT = "dreamlabs/dream-1-beta"  # any checkpoint of the body: the compile does not depend on it
 GRIPPER_CAN_ID = 7
 ## The motors tab: how often the angles are read while a page watches, and how long a `watch` keeps that going.
@@ -404,8 +407,29 @@ class DreamBackend:
 
         `ready` is called once the model is up and the loop is about to start: the recording begins there, not
         earlier, because opening the model (its IK compiles) starves every other thread of the computer, and the arms'
-        own threads must not be among the starved while the encoders run too.
+        own threads must not be among the starved while the encoders run too. A run that stops on Dream's IK failing
+        (see IK_RETRIES) reopens the model and goes on, with the recording running and `ready` called once.
         """
+        ready_called = False
+
+        def ready_once() -> None:
+            nonlocal ready_called
+            if not ready_called:
+                ready_called = True
+                ready()
+
+        for attempt in range(IK_RETRIES + 1):
+            try:
+                await self._run_once(prompt, checkpoint, dry_run, stop, ready_once)
+                return
+            except np.linalg.LinAlgError as error:
+                if attempt == IK_RETRIES or stop.is_set():
+                    raise
+                logging.warning("the model's IK failed (%s); reopening the model, try %d", error, attempt + 2)
+
+    async def _run_once(
+        self, prompt: str, checkpoint: str, dry_run: bool, stop: asyncio.Event, ready: Callable[[], None]
+    ) -> None:
         from robots import control, errors
 
         run, followers = self._run, self._followers

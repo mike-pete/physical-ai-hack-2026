@@ -67,3 +67,8 @@ An arm refused to open because its gripper motor latched a fault (13 is "lost co
 ## Sequences
 
 The Sequences tab chains saved prompts: each step is a prompt and a time in seconds (5 to 3600). Press Run sequence with the arms holding a pose. Step 1 runs for its time, the arms hold where they are, then step 2 starts from there, and so on. Each step is its own run in the Runs tab, with its own videos. Stop, an error or a step that cannot start ends the whole sequence (an alert says at which step). Deleting a prompt removes its steps from every sequence. Between steps the model reopens, which takes a few seconds with the arms holding.
+
+## When a run fails
+
+- `LinAlgError: SVD did not converge` is Dream's IK failing on a reply it cannot turn into rotations, usually before the first chunk. The arms are holding; the worker reopens the model and tries again twice, and the run fails only if all three tries do. The cause is not known.
+- `action buffer empty for N consecutive ticks` means the model stopped answering for 20 s (or its session expired). Answers later than 3 s are discarded and asked for again, so a slow server shows up as the arms waiting. Check the station's network first: a big download on it (an install, a sync) slows every answer.

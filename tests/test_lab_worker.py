@@ -236,3 +236,58 @@ def test_a_run_that_fails_before_the_model_is_ready_records_nothing(lw, tmp_path
     sink = asyncio.run(go())
     assert "run_started" not in sink.kinds()
     assert next(e for e in sink.events if e["event"] == "run_ended")["status"] == "error"
+
+
+def _dream_run(lw, outcomes, stop=None):
+    """DreamBackend.run with `_run_once` replaced by `outcomes` (an exception to raise, or None to succeed)."""
+    backend = object.__new__(lw.DreamBackend)
+    attempts, readies = [], []
+
+    async def once(prompt, checkpoint, dry_run, stop_event, ready):
+        attempts.append(1)
+        ready()
+        outcome = outcomes[len(attempts) - 1]
+        if outcome:
+            raise outcome
+
+    backend._run_once = once
+
+    async def go():
+        await backend.run("p", "c", True, stop or asyncio.Event(), lambda: readies.append(1))
+
+    return go, attempts, readies
+
+
+def test_a_run_retries_when_dreams_ik_fails_and_starts_the_recording_once(lw):
+    import numpy as np
+
+    go, attempts, readies = _dream_run(lw, [np.linalg.LinAlgError("SVD did not converge"), None])
+    asyncio.run(go())
+    assert len(attempts) == 2
+    assert len(readies) == 1
+
+
+def test_a_run_gives_up_after_the_retries(lw):
+    import numpy as np
+
+    failure = np.linalg.LinAlgError("SVD did not converge")
+    go, attempts, _ = _dream_run(lw, [failure] * (lw.IK_RETRIES + 1))
+    with pytest.raises(np.linalg.LinAlgError):
+        asyncio.run(go())
+    assert len(attempts) == lw.IK_RETRIES + 1
+
+
+def test_a_run_does_not_retry_other_errors_or_after_stop(lw):
+    import numpy as np
+
+    go, attempts, _ = _dream_run(lw, [RuntimeError("no checkpoint")])
+    with pytest.raises(RuntimeError):
+        asyncio.run(go())
+    assert len(attempts) == 1
+
+    stopped = asyncio.Event()
+    stopped.set()
+    go, attempts, _ = _dream_run(lw, [np.linalg.LinAlgError("x"), None], stop=stopped)
+    with pytest.raises(np.linalg.LinAlgError):
+        asyncio.run(go())
+    assert len(attempts) == 1
